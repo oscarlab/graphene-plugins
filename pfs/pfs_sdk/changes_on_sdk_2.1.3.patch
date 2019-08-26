@@ -1,0 +1,1169 @@
+From 36c140f972571450c18714bbecab814d4adad171 Mon Sep 17 00:00:00 2001
+From: "Krishnakumar, Sudha" <sudha.krishnakumar@intel.com>
+Date: Mon, 22 Jul 2019 14:31:52 -0700
+Subject: [PATCH] Squashed commits to get one commit for code changes on top of
+ linux_sgx_2.1.3, to build 1 combined protectedfs library changes, without
+ sgx(ecall/ocall dependencies) and also compatible with graphene.
+
+Cleaned up some remnants, to get a clean patch, without any build
+or steps related artifacts.
+
+Disabled DEBUG in sgx_uprotectedfs.cpp
+---
+ .../sgx_tprotected_fs/file_crypto.cpp         |  31 ++++-
+ .../sgx_tprotected_fs/file_flush.cpp          |  58 ++++----
+ .../sgx_tprotected_fs/file_init.cpp           |  38 ++++--
+ .../sgx_tprotected_fs/file_other.cpp          |   4 +-
+ .../sgx_tprotected_fs/file_read_write.cpp     |  21 ++-
+ .../sgx_tprotected_fs/protected_fs_file.h     |  17 ++-
+ .../sgx_tprotected_fs/protected_fs_nodes.h    |   1 +
+ .../sgx_tprotected_fs/sgx_tprotected_fs.cpp   |   5 +-
+ .../sgx_tprotected_fs/sgx_tprotected_fs_t.cpp | 124 ++++++++++++++++++
+ .../sgx_tprotected_fs/sgx_tprotected_fs_t.h   |  35 +++++
+ .../sgx_uprotected_fs/sgx_tprotected_fs_u.h   |  34 +++++
+ .../sgx_uprotected_fs/sgx_uprotected_fs.cpp   |  78 ++++++-----
+ 12 files changed, 349 insertions(+), 97 deletions(-)
+ create mode 100644 sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs_t.cpp
+ create mode 100644 sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs_t.h
+ create mode 100644 sdk/protected_fs/sgx_uprotected_fs/sgx_tprotected_fs_u.h
+
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/file_crypto.cpp b/sdk/protected_fs/sgx_tprotected_fs/file_crypto.cpp
+index b9a5645..7030028 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/file_crypto.cpp
++++ b/sdk/protected_fs/sgx_tprotected_fs/file_crypto.cpp
+@@ -32,8 +32,15 @@
+ #include "protected_fs_file.h"
+ #include <tseal_migration_attr.h>
+ 
+-#include <sgx_utils.h>
+-#include <sgx_trts.h>
++#include "sgx_proxy_sdk_tlibc.h"
++#include "sgx_attributes.h"
++#include "sgx_utils.h"
++
++#include "pfs_debug.h"
++
++//Note: sgx_trts.h has sgx_read_rand defn.
++#include "sgx_proxy_rand.h"
++//#include "sgx_trts.h"
+ 
+ #define MASTER_KEY_NAME      "SGX-PROTECTED-FS-MASTER-KEY"
+ #define RANDOM_KEY_NAME      "SGX-PROTECTED-FS-RANDOM-KEY"
+@@ -56,7 +63,9 @@ typedef struct {
+ 
+ bool protected_fs_file::generate_secure_blob(sgx_aes_gcm_128bit_key_t* key, const char* label, uint64_t physical_node_number, sgx_aes_gcm_128bit_tag_t* output)
+ {
++
+ 	kdf_input_t buf = {0, "", 0, "", 0};
++	sgx_status_t status;
+ 
+ 	uint32_t len = (uint32_t)strnlen(label, MAX_LABEL_LEN + 1);
+ 	if (len > MAX_LABEL_LEN)
+@@ -83,7 +92,7 @@ bool protected_fs_file::generate_secure_blob(sgx_aes_gcm_128bit_key_t* key, cons
+ 	//           optionally, a nonce known by the parties who derive the keys.
+ 	buf.node_number = physical_node_number;
+ 
+-	sgx_status_t status = sgx_read_rand((unsigned char*)&(buf.nonce16), sizeof(sgx_cmac_128bit_tag_t));
++	status = sgx_read_rand((unsigned char*)&(buf.nonce16), sizeof(sgx_cmac_128bit_tag_t));
+ 	if (status != SGX_SUCCESS)
+ 	{
+ 		last_error = status;
+@@ -94,6 +103,9 @@ bool protected_fs_file::generate_secure_blob(sgx_aes_gcm_128bit_key_t* key, cons
+ 	buf.output_len = 0x80;
+ 
+ 	status = sgx_rijndael128_cmac_msg(key, (const uint8_t*)&buf, sizeof(kdf_input_t), output);
++
++        DBG_PRINT("\nafter sgx_cmac_msg, status=%d\n", (int)status);
++
+ 	if (status != SGX_SUCCESS)
+ 	{
+ 		last_error = status;
+@@ -149,6 +161,9 @@ bool protected_fs_file::generate_secure_blob_from_user_kdk(bool restore)
+ 	buf.output_len = 0x80;
+ 
+ 	status = sgx_rijndael128_cmac_msg(&user_kdk_key, (const uint8_t*)&buf, sizeof(kdf_input_t), &cur_key);
++
++        DBG_PRINT("\nafter sgx_cmac_msg, status=%d\n", (int)status);
++
+ 	if (status != SGX_SUCCESS)
+ 	{
+ 		last_error = status;
+@@ -211,9 +226,14 @@ bool protected_fs_file::generate_random_meta_data_key()
+ 	memcpy(&key_request.cpu_svn, &report.body.cpu_svn, sizeof(sgx_cpu_svn_t));
+ 	memcpy(&key_request.isv_svn, &report.body.isv_svn, sizeof(sgx_isv_svn_t));
+ 
++#ifdef PROTFS_DEBUG
++	DBG_PRINT("");
++	PRINT_BUF("CPU_SVN", (uint8_t *)&report.body.cpu_svn, sizeof(sgx_cpu_svn_t));
++	PRINT_BUF("ISV_SVN", (uint8_t *)&report.body.isv_svn, sizeof(sgx_isv_svn_t));
++#endif
++
+     key_request.attribute_mask.flags = TSEAL_DEFAULT_FLAGSMASK;
+     key_request.attribute_mask.xfrm = 0x0;
+-
+ 	key_request.misc_mask = TSEAL_DEFAULT_MISCMASK;
+ 		
+ 	sgx_status_t status = sgx_read_rand((unsigned char*)&key_request.key_id, sizeof(sgx_key_id_t));
+@@ -265,9 +285,8 @@ bool protected_fs_file::restore_current_meta_data_key(const sgx_aes_gcm_128bit_k
+ 	key_request.key_name = SGX_KEYSELECT_SEAL;
+ 	key_request.key_policy = SGX_KEYPOLICY_MRSIGNER;
+ 
+-	key_request.attribute_mask.flags = TSEAL_DEFAULT_FLAGSMASK;
++    key_request.attribute_mask.flags = TSEAL_DEFAULT_FLAGSMASK;
+     key_request.attribute_mask.xfrm = 0x0;
+-
+ 	key_request.misc_mask = TSEAL_DEFAULT_MISCMASK;
+ 
+ 	memcpy(&key_request.cpu_svn, &file_meta_data.plain_part.cpu_svn, sizeof(sgx_cpu_svn_t));
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/file_flush.cpp b/sdk/protected_fs/sgx_tprotected_fs/file_flush.cpp
+index be43c51..a1f0109 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/file_flush.cpp
++++ b/sdk/protected_fs/sgx_tprotected_fs/file_flush.cpp
+@@ -34,9 +34,6 @@
+ #include "protected_fs_file.h"
+ #include <tprotected_fs.h>
+ 
+-
+-#include <sgx_trts.h>
+-
+ bool protected_fs_file::flush(/*bool mc*/)
+ {
+ 	bool result = false;
+@@ -181,7 +178,7 @@ bool protected_fs_file::write_recovery_file()
+ 	uint8_t result = 0;
+ 	int32_t result32 = 0;
+ 
+-	status = u_sgxprotectedfs_recovery_file_open(&recovery_file, recovery_filename);
++	status = (sgx_status_t)u_sgxprotectedfs_recovery_file_open_wrap(&recovery_file, recovery_filename);
+ 	if (status != SGX_SUCCESS || recovery_file == NULL)
+ 	{
+ 		last_error = status != SGX_SUCCESS ? status : SGX_ERROR_FILE_CANT_OPEN_RECOVERY_FILE;
+@@ -211,11 +208,11 @@ bool protected_fs_file::write_recovery_file()
+ 			recovery_node = &file_mht_node->recovery_node;
+ 		}
+ 
+-		status = u_sgxprotectedfs_fwrite_recovery_node(&result, recovery_file, (uint8_t*)recovery_node, sizeof(recovery_node_t));
++		status = (sgx_status_t)u_sgxprotectedfs_fwrite_recovery_node_wrap(&result, recovery_file, (uint8_t*)recovery_node, sizeof(recovery_node_t));
+ 		if (status != SGX_SUCCESS || result != 0)
+ 		{
+-			u_sgxprotectedfs_fclose(&result32, recovery_file);
+-			u_sgxprotectedfs_remove(&result32, recovery_filename);
++			u_sgxprotectedfs_fclose_wrap(&result32, recovery_file);
++			u_sgxprotectedfs_remove_wrap(&result32, recovery_filename);
+ 			last_error = status != SGX_SUCCESS ? status : SGX_ERROR_FILE_CANT_WRITE_RECOVERY_FILE;
+ 			return false;
+ 		}
+@@ -223,26 +220,26 @@ bool protected_fs_file::write_recovery_file()
+ 
+ 	if (root_mht.need_writing == true && root_mht.new_node == false)
+ 	{
+-		status = u_sgxprotectedfs_fwrite_recovery_node(&result, recovery_file, (uint8_t*)&root_mht.recovery_node, sizeof(recovery_node_t));
++		status = (sgx_status_t)u_sgxprotectedfs_fwrite_recovery_node_wrap(&result, recovery_file, (uint8_t*)&root_mht.recovery_node, sizeof(recovery_node_t));
+ 		if (status != SGX_SUCCESS || result != 0)
+ 		{
+-			u_sgxprotectedfs_fclose(&result32, recovery_file);
+-			u_sgxprotectedfs_remove(&result32, recovery_filename);
++			u_sgxprotectedfs_fclose_wrap(&result32, recovery_file);
++			u_sgxprotectedfs_remove_wrap(&result32, recovery_filename);
+ 			last_error = status != SGX_SUCCESS ? status : SGX_ERROR_FILE_CANT_WRITE_RECOVERY_FILE;
+ 			return false;
+ 		}
+ 	}
+ 
+-	status = u_sgxprotectedfs_fwrite_recovery_node(&result, recovery_file, (uint8_t*)&meta_data_recovery_node, sizeof(recovery_node_t));
++	status = (sgx_status_t)u_sgxprotectedfs_fwrite_recovery_node_wrap(&result, recovery_file, (uint8_t*)&meta_data_recovery_node, sizeof(recovery_node_t));
+ 	if (status != SGX_SUCCESS || result != 0)
+ 	{
+-		u_sgxprotectedfs_fclose(&result32, recovery_file);
+-		u_sgxprotectedfs_remove(&result32, recovery_filename);
++		u_sgxprotectedfs_fclose_wrap(&result32, recovery_file);
++		u_sgxprotectedfs_remove_wrap(&result32, recovery_filename);
+ 		last_error = status != SGX_SUCCESS ? status : SGX_ERROR_FILE_CANT_WRITE_RECOVERY_FILE;
+ 		return false;
+ 	}
+ 
+-	u_sgxprotectedfs_fclose(&result32, recovery_file); // TODO - check result
++	u_sgxprotectedfs_fclose_wrap(&result32, recovery_file); // TODO - check result
+ 
+ 	return true;
+ }
+@@ -255,7 +252,7 @@ bool protected_fs_file::set_update_flag(bool flush_to_disk)
+ 	int32_t result32;
+ 
+ 	file_meta_data.plain_part.update_flag = 1;
+-	status = u_sgxprotectedfs_fwrite_node(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
++	status = (sgx_status_t)u_sgxprotectedfs_fwrite_node_wrap(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
+ 	file_meta_data.plain_part.update_flag = 0; // turn it off in memory. at the end of the flush, when we'll write the meta-data to disk, this flag will also be cleared there.
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+@@ -266,11 +263,11 @@ bool protected_fs_file::set_update_flag(bool flush_to_disk)
+ 
+ 	if (flush_to_disk == true)
+ 	{
+-		status = u_sgxprotectedfs_fflush(&result, file);
++		status = (sgx_status_t)u_sgxprotectedfs_fflush_wrap(&result, file);
+ 		if (status != SGX_SUCCESS || result != 0)
+ 		{
+ 			last_error = status != SGX_SUCCESS ? status : SGX_ERROR_FILE_FLUSH_FAILED;
+-			u_sgxprotectedfs_fwrite_node(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE); // try to clear the update flag, in the OS cache at least...
++			u_sgxprotectedfs_fwrite_node_wrap(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE); // try to clear the update flag, in the OS cache at least...
+ 			return false;
+ 		}
+ 
+@@ -290,8 +287,8 @@ void protected_fs_file::clear_update_flag()
+ 	if (_RECOVERY_HOOK_(3))
+ 		return;
+ 	assert(file_meta_data.plain_part.update_flag == 0);
+-	u_sgxprotectedfs_fwrite_node(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
+-	u_sgxprotectedfs_fflush(&result, file);
++	u_sgxprotectedfs_fwrite_node_wrap(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
++	u_sgxprotectedfs_fflush_wrap(&result, file);
+ }
+ 
+ 
+@@ -329,6 +326,9 @@ bool protected_fs_file::update_all_data_and_mht_nodes()
+ 				// encrypt the data, this also saves the gmac of the operation in the mht crypto node
+ 				status = sgx_rijndael128GCM_encrypt(&cur_key, data_node->plain.data, NODE_SIZE, data_node->encrypted.cipher, 
+ 													empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &gcm_crypto_data->gmac);
++
++			        DBG_PRINT("after sgx_gcm_enc, status=%d\n", (int)status);
++
+ 				if (status != SGX_SUCCESS)
+ 				{
+ 					last_error = status;
+@@ -338,6 +338,7 @@ bool protected_fs_file::update_all_data_and_mht_nodes()
+ 				memcpy(gcm_crypto_data->key, cur_key, sizeof(sgx_aes_gcm_128bit_key_t)); // save the key used for this encryption
+ 
+ 				file_mht_node = data_node->parent;
++
+ 				// this loop should do nothing, add it here just to be safe
+ 				while (file_mht_node->mht_node_number != 0)
+ 				{
+@@ -383,6 +384,9 @@ bool protected_fs_file::update_all_data_and_mht_nodes()
+ 
+ 		status = sgx_rijndael128GCM_encrypt(&cur_key, (const uint8_t*)&file_mht_node->plain, NODE_SIZE, file_mht_node->encrypted.cipher, 
+ 											empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &gcm_crypto_data->gmac);
++
++                DBG_PRINT("after sgx_gcm_enc, status=%d\n", (int)status);
++
+ 		if (status != SGX_SUCCESS)
+ 		{
+ 			mht_list.clear();
+@@ -401,6 +405,9 @@ bool protected_fs_file::update_all_data_and_mht_nodes()
+ 
+ 	status = sgx_rijndael128GCM_encrypt(&cur_key, (const uint8_t*)&root_mht.plain, NODE_SIZE, root_mht.encrypted.cipher, 
+ 										empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &encrypted_part_plain.mht_gmac);
++
++        DBG_PRINT("after sgx_gcm_enc, status=%d\n", (int)status);
++
+ 	if (status != SGX_SUCCESS)
+ 	{
+ 		last_error = status;
+@@ -430,6 +437,9 @@ bool protected_fs_file::update_meta_data_node()
+ 										empty_iv, SGX_AESGCM_IV_SIZE, 
+ 										NULL, 0, 
+ 										&file_meta_data.plain_part.meta_data_gmac);
++
++        DBG_PRINT("after sgx_gcm_enc, status=%d\n", (int)status);
++
+ 	if (status != SGX_SUCCESS)
+ 	{
+ 		last_error = status;
+@@ -479,7 +489,7 @@ bool protected_fs_file::write_all_changes_to_disk(bool flush_to_disk)
+ 				node_number = file_mht_node->physical_node_number;
+ 			}
+ 
+-			status = u_sgxprotectedfs_fwrite_node(&result32, file, node_number, data_to_write, NODE_SIZE);
++			status = (sgx_status_t)u_sgxprotectedfs_fwrite_node_wrap(&result32, file, node_number, data_to_write, NODE_SIZE);
+ 			if (status != SGX_SUCCESS || result32 != 0)
+ 			{
+ 				last_error = (status != SGX_SUCCESS) ? status : 
+@@ -501,7 +511,7 @@ bool protected_fs_file::write_all_changes_to_disk(bool flush_to_disk)
+ 
+ 		}
+ 
+-		status = u_sgxprotectedfs_fwrite_node(&result32, file, 1, (uint8_t*)&root_mht.encrypted, NODE_SIZE);
++		status = (sgx_status_t)u_sgxprotectedfs_fwrite_node_wrap(&result32, file, 1, (uint8_t*)&root_mht.encrypted, NODE_SIZE);
+ 		if (status != SGX_SUCCESS || result32 != 0)
+ 		{
+ 			last_error = (status != SGX_SUCCESS) ? status : 
+@@ -512,7 +522,7 @@ bool protected_fs_file::write_all_changes_to_disk(bool flush_to_disk)
+ 		root_mht.new_node = false;
+ 	}
+ 
+-	status = u_sgxprotectedfs_fwrite_node(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
++	status = (sgx_status_t)u_sgxprotectedfs_fwrite_node_wrap(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+ 		last_error = (status != SGX_SUCCESS) ? status : 
+@@ -522,7 +532,7 @@ bool protected_fs_file::write_all_changes_to_disk(bool flush_to_disk)
+ 
+ 	if (flush_to_disk == true)
+ 	{
+-		status = u_sgxprotectedfs_fflush(&result, file);
++		status = (sgx_status_t)u_sgxprotectedfs_fflush_wrap(&result, file);
+ 		if (status != SGX_SUCCESS || result != 0)
+ 		{
+ 			last_error = status != SGX_SUCCESS ? status : SGX_ERROR_FILE_FLUSH_FAILED;
+@@ -542,7 +552,7 @@ void protected_fs_file::erase_recovery_file()
+ 	if (recovery_filename[0] == '\0') // not initialized yet
+ 		return;
+ 
+-	status = u_sgxprotectedfs_remove(&result32, recovery_filename);
++	status = (sgx_status_t)u_sgxprotectedfs_remove_wrap(&result32, recovery_filename);
+ 	(void)status; // don't care if it succeeded or failed...just remove the warning
+ }
+ 
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/file_init.cpp b/sdk/protected_fs/sgx_tprotected_fs/file_init.cpp
+index 9e9f473..49d0276 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/file_init.cpp
++++ b/sdk/protected_fs/sgx_tprotected_fs/file_init.cpp
+@@ -33,6 +33,11 @@
+ #include "sgx_tprotected_fs_t.h"
+ #include "protected_fs_file.h"
+ 
++#include "pfs_debug.h"
++
++#include "sgx_proxy_sdk_tlibc.h"
++
++#include "sgx_report.h"
+ #include <sgx_utils.h>
+ 
+ // remove the file path if it's there, leave only the filename, null terminated
+@@ -142,7 +147,7 @@ protected_fs_file::protected_fs_file(const char* filename, const char* mode, con
+ 		return;
+ 	}
+ 
+-	status = u_sgxprotectedfs_check_if_file_exists(&result, filename); // if result == 1 --> file exists
++	status = (sgx_status_t)u_sgxprotectedfs_check_if_file_exists_wrap(&result, filename); // if result == 1 --> file exists
+ 	if (status != SGX_SUCCESS)
+ 	{
+ 		last_error = status;
+@@ -162,7 +167,7 @@ protected_fs_file::protected_fs_file(const char* filename, const char* mode, con
+ 		}
+ 
+ 		// re-check
+-		status = u_sgxprotectedfs_check_if_file_exists(&result, filename);
++		status = (sgx_status_t)u_sgxprotectedfs_check_if_file_exists_wrap(&result, filename);
+ 		if (status != SGX_SUCCESS || result == 1)
+ 		{
+ 			last_error = (status != SGX_SUCCESS) ? status :
+@@ -187,7 +192,7 @@ protected_fs_file::protected_fs_file(const char* filename, const char* mode, con
+ 	read_only = (open_mode.read == 1 && open_mode.update == 0); // read only files can be opened simultaneously by many enclaves
+ 
+ 	do {
+-		status = u_sgxprotectedfs_exclusive_file_open(&file, filename, read_only, &real_file_size, &result32);
++		status = (sgx_status_t)u_sgxprotectedfs_exclusive_file_open_wrap(&file, filename, read_only, &real_file_size, &result32);
+ 		if (status != SGX_SUCCESS || file == NULL)
+ 		{
+ 			last_error = (status != SGX_SUCCESS) ? status :
+@@ -240,7 +245,7 @@ protected_fs_file::protected_fs_file(const char* filename, const char* mode, con
+ 	{
+ 		if (file != NULL)
+ 		{
+-			u_sgxprotectedfs_fclose(&result32, file); // we don't care about the result
++			u_sgxprotectedfs_fclose_wrap(&result32, file); // we don't care about the result
+ 			file = NULL;
+ 		}
+ 	}
+@@ -276,7 +281,8 @@ void protected_fs_file::init_fields()
+ 
+ 	recovery_filename[0] = '\0';
+ 	
+-	memset(&mutex, 0, sizeof(sgx_thread_mutex_t));
++	//memset(&mutex, 0, sizeof(sgx_thread_mutex_t));
++	memset(&mutex, 0, sizeof(pthread_mutex_t));
+ 
+ 	// set hash size to fit MAX_PAGES_IN_CACHE
+ 	cache.rehash(MAX_PAGES_IN_CACHE);
+@@ -340,7 +346,7 @@ bool protected_fs_file::file_recovery(const char* filename)
+ 	int32_t result32 = 0;
+ 	int64_t new_file_size = 0;
+ 
+-	status = u_sgxprotectedfs_fclose(&result32, file);
++	status = (sgx_status_t)u_sgxprotectedfs_fclose_wrap(&result32, file);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+ 		last_error = (status != SGX_SUCCESS) ? status : 
+@@ -350,7 +356,7 @@ bool protected_fs_file::file_recovery(const char* filename)
+ 
+ 	file = NULL;
+ 
+-	status = u_sgxprotectedfs_do_file_recovery(&result32, filename, recovery_filename, NODE_SIZE);
++	status = (sgx_status_t)u_sgxprotectedfs_do_file_recovery_wrap(&result32, filename, recovery_filename, NODE_SIZE);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+ 		last_error = (status != SGX_SUCCESS) ? status :
+@@ -358,7 +364,7 @@ bool protected_fs_file::file_recovery(const char* filename)
+ 		return false;
+ 	}
+ 
+-	status = u_sgxprotectedfs_exclusive_file_open(&file, filename, read_only, &new_file_size, &result32);
++	status = (sgx_status_t)u_sgxprotectedfs_exclusive_file_open_wrap(&file, filename, read_only, &new_file_size, &result32);
+ 	if (status != SGX_SUCCESS || file == NULL)
+ 	{
+ 		last_error = (status != SGX_SUCCESS) ? status : 
+@@ -373,7 +379,7 @@ bool protected_fs_file::file_recovery(const char* filename)
+ 		return false;
+ 	}
+ 
+-	status = u_sgxprotectedfs_fread_node(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
++	status = (sgx_status_t)u_sgxprotectedfs_fread_node_wrap(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+ 		last_error = (status != SGX_SUCCESS) ? status : 
+@@ -391,7 +397,7 @@ bool protected_fs_file::init_existing_file(const char* filename, const char* cle
+ 	int32_t result32;
+ 
+ 	// read meta-data node
+-	status = u_sgxprotectedfs_fread_node(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
++	status = (sgx_status_t)u_sgxprotectedfs_fread_node_wrap(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+ 		last_error = (status != SGX_SUCCESS) ? status : 
+@@ -448,6 +454,8 @@ bool protected_fs_file::init_existing_file(const char* filename, const char* cle
+ 										empty_iv, SGX_AESGCM_IV_SIZE,
+ 										NULL, 0,
+ 										&file_meta_data.plain_part.meta_data_gmac);
++        DBG_PRINT("after call to sgx_gcm_dec, status=%d\n", (int)status);
++
+ 	if (status != SGX_SUCCESS)
+ 	{
+ 		last_error = status;
+@@ -508,7 +516,7 @@ bool protected_fs_file::init_existing_file(const char* filename, const char* cle
+ 	if (encrypted_part_plain.size > MD_USER_DATA_SIZE)
+ 	{
+ 		// read the root node of the mht
+-		status = u_sgxprotectedfs_fread_node(&result32, file, 1, root_mht.encrypted.cipher, NODE_SIZE);
++		status = (sgx_status_t)u_sgxprotectedfs_fread_node_wrap(&result32, file, 1, root_mht.encrypted.cipher, NODE_SIZE);
+ 		if (status != SGX_SUCCESS || result32 != 0)
+ 		{
+ 			last_error = (status != SGX_SUCCESS) ? status : 
+@@ -520,6 +528,9 @@ bool protected_fs_file::init_existing_file(const char* filename, const char* cle
+ 		status = sgx_rijndael128GCM_decrypt(&encrypted_part_plain.mht_key, 
+ 											root_mht.encrypted.cipher, NODE_SIZE, (uint8_t*)&root_mht.plain, 
+ 											empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &encrypted_part_plain.mht_gmac);
++
++        	DBG_PRINT("after call to sgx_gcm_dec, status=%d\n", (int)status);
++
+ 		if (status != SGX_SUCCESS)
+ 		{
+ 			last_error = status;
+@@ -547,8 +558,7 @@ bool protected_fs_file::init_new_file(const char* clean_filename)
+ 
+ 	return true;
+ }
+-
+-
++	
+ protected_fs_file::~protected_fs_file()
+ {
+ 	void* data;
+@@ -613,7 +623,7 @@ bool protected_fs_file::pre_close(sgx_key_128bit_t* key, bool import)
+ 
+ 	if (file != NULL)
+ 	{
+-		status = u_sgxprotectedfs_fclose(&result32, file);
++		status = (sgx_status_t)u_sgxprotectedfs_fclose_wrap(&result32, file);
+ 		if (status != SGX_SUCCESS || result32 != 0)
+ 		{
+ 			last_error = (status != SGX_SUCCESS) ? status : 
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/file_other.cpp b/sdk/protected_fs/sgx_tprotected_fs/file_other.cpp
+index 567175c..7d06285 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/file_other.cpp
++++ b/sdk/protected_fs/sgx_tprotected_fs/file_other.cpp
+@@ -33,8 +33,8 @@
+ #include "sgx_tprotected_fs_t.h"
+ #include "protected_fs_file.h"
+ 
++#include "sgx_proxy_sdk_tlibc.h"
+ #include <sgx_utils.h>
+-//#include <sgx_trts.h>
+ 
+ #include <errno.h>
+ 
+@@ -142,7 +142,7 @@ int32_t protected_fs_file::remove(const char* filename)
+ */
+ 	
+ 	// do the actual file removal
+-	status = u_sgxprotectedfs_remove(&result32, filename);
++	status = (sgx_status_t)u_sgxprotectedfs_remove_wrap(&result32, filename);
+ 	if (status != SGX_SUCCESS) 
+ 	{
+ 		errno = status;
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/file_read_write.cpp b/sdk/protected_fs/sgx_tprotected_fs/file_read_write.cpp
+index 2b0070e..5198d62 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/file_read_write.cpp
++++ b/sdk/protected_fs/sgx_tprotected_fs/file_read_write.cpp
+@@ -32,7 +32,8 @@
+ #include "sgx_tprotected_fs_t.h"
+ #include "protected_fs_file.h"
+ 
+-#include <sgx_trts.h>
++#include "sgx_proxy_sdk_tlibc.h"
++//#include <sgx_trts.h>
+ 
+ size_t protected_fs_file::write(const void* ptr, size_t size, size_t count)
+ {
+@@ -65,14 +66,14 @@ size_t protected_fs_file::write(const void* ptr, size_t size, size_t count)
+ 		return 0;
+ 	}
+ #endif
+-
++/*
+ 	if (sgx_is_outside_enclave(ptr, data_left_to_write))
+ 	{
+ 		last_error = SGX_ERROR_INVALID_PARAMETER;
+ 		sgx_thread_mutex_unlock(&mutex);
+ 		return 0;
+ 	}
+-
++*/
+ 	if (file_status != SGX_FILE_STATUS_OK)
+ 	{
+ 		last_error = SGX_ERROR_FILE_BAD_STATUS;
+@@ -199,14 +200,14 @@ size_t protected_fs_file::read(void* ptr, size_t size, size_t count)
+ 	}
+ #endif
+ 
+-
++/*
+ 	if (sgx_is_outside_enclave(ptr, data_left_to_read))
+ 	{
+ 		last_error = EINVAL;
+ 		sgx_thread_mutex_unlock(&mutex);
+ 		return 0;
+ 	}
+-
++*/
+ 	if (file_status != SGX_FILE_STATUS_OK)
+ 	{
+ 		last_error = SGX_ERROR_FILE_BAD_STATUS;
+@@ -482,7 +483,7 @@ file_data_node_t* protected_fs_file::read_data_node()
+ 	file_data_node->physical_node_number = physical_node_number;
+ 	file_data_node->parent = file_mht_node;
+ 		
+-	status = u_sgxprotectedfs_fread_node(&result32, file, file_data_node->physical_node_number, file_data_node->encrypted.cipher, NODE_SIZE);
++	status = (sgx_status_t)u_sgxprotectedfs_fread_node_wrap(&result32, file, file_data_node->physical_node_number, file_data_node->encrypted.cipher, NODE_SIZE);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+ 		delete file_data_node;
+@@ -495,6 +496,9 @@ file_data_node_t* protected_fs_file::read_data_node()
+ 
+ 	// this function decrypt the data _and_ checks the integrity of the data against the gmac
+ 	status = sgx_rijndael128GCM_decrypt(&gcm_crypto_data->key, file_data_node->encrypted.cipher, NODE_SIZE, file_data_node->plain.data, empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &gcm_crypto_data->gmac);
++
++	DBG_PRINT("after sgx_gcm_dec, status=%d\n", (int)status);
++
+ 	if (status != SGX_SUCCESS)
+ 	{
+ 		delete file_data_node;
+@@ -620,7 +624,7 @@ file_mht_node_t* protected_fs_file::read_mht_node(uint64_t mht_node_number)
+ 	file_mht_node->physical_node_number = physical_node_number;
+ 	file_mht_node->parent = parent_file_mht_node;
+ 		
+-	status = u_sgxprotectedfs_fread_node(&result32, file, file_mht_node->physical_node_number, file_mht_node->encrypted.cipher, NODE_SIZE);
++	status = (sgx_status_t)u_sgxprotectedfs_fread_node_wrap(&result32, file, file_mht_node->physical_node_number, file_mht_node->encrypted.cipher, NODE_SIZE);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+ 		delete file_mht_node;
+@@ -633,6 +637,9 @@ file_mht_node_t* protected_fs_file::read_mht_node(uint64_t mht_node_number)
+ 
+ 	// this function decrypt the data _and_ checks the integrity of the data against the gmac
+ 	status = sgx_rijndael128GCM_decrypt(&gcm_crypto_data->key, file_mht_node->encrypted.cipher, NODE_SIZE, (uint8_t*)&file_mht_node->plain, empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &gcm_crypto_data->gmac);
++
++        DBG_PRINT("after sgx_gcm_dec, status=%d\n", (int)status);
++
+ 	if (status != SGX_SUCCESS)
+ 	{
+ 		delete file_mht_node;
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/protected_fs_file.h b/sdk/protected_fs/sgx_tprotected_fs/protected_fs_file.h
+index c03f7f2..8c99c9d 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/protected_fs_file.h
++++ b/sdk/protected_fs/sgx_tprotected_fs/protected_fs_file.h
+@@ -34,15 +34,19 @@
+ #ifndef _PROTECTED_FS_H_
+ #define _PROTECTED_FS_H_
+ 
++#include "string.h"
+ #include "protected_fs_nodes.h"
+ #include "lru_cache.h"
++#include "errno.h"
++
+ #include "sgx_error.h"
+ #include "sgx_tcrypto.h"
+-#include "errno.h"
++#include "sgx_proxy_thread.h"
+ 
+-#include <sgx_thread.h>
+ #include "sgx_tprotected_fs.h"
+ 
++#include "pfs_debug.h"
++
+ typedef enum
+ {
+ 	SGX_FILE_STATUS_OK = 0,
+@@ -59,9 +63,11 @@ typedef enum
+ 
+ #define MAX_PAGES_IN_CACHE 48
+ 
++#define FILENAME_MAX (260)
++
+ COMPILE_TIME_ASSERT(filename_length, FILENAME_MAX_LEN == FILENAME_MAX);
+ 
+-typedef void FILE;
++typedef void FILEPTR;
+ 
+ typedef union
+ {
+@@ -146,7 +152,7 @@ private:
+ 	
+ 	file_mht_node_t root_mht; // the root of the mht is always needed (for files bigger than 3KB)
+ 
+-	FILE* file; // OS's FILE pointer
++	FILEPTR* file; // OS's FILE pointer
+ 	
+ 	open_mode_t open_mode;
+ 	uint8_t read_only;
+@@ -159,7 +165,8 @@ private:
+ 	uint32_t last_error; // last operation error
+ 	protected_fs_status_e file_status;
+ 	
+-	sgx_thread_mutex_t mutex;
++	//sgx_thread_mutex_t mutex;
++	pthread_mutex_t mutex;
+ 
+ 	uint8_t use_user_kdk_key;
+ 	sgx_aes_gcm_128bit_key_t user_kdk_key; // recieved from user, used instead of the seal key
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/protected_fs_nodes.h b/sdk/protected_fs/sgx_tprotected_fs/protected_fs_nodes.h
+index cdc0044..374e33c 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/protected_fs_nodes.h
++++ b/sdk/protected_fs/sgx_tprotected_fs/protected_fs_nodes.h
+@@ -40,6 +40,7 @@
+ #include <sgx_tcrypto.h>
+ #include <sgx_tae_service.h>
+ 
++
+ #pragma pack(push, 1)
+ 
+ #define NODE_SIZE 4096
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs.cpp b/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs.cpp
+index 4fe245c..ce7b9b3 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs.cpp
++++ b/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs.cpp
+@@ -248,7 +248,4 @@ int32_t sgx_fclear_cache(SGX_FILE* stream)
+ 	protected_fs_file* file = (protected_fs_file*)stream;
+ 
+ 	return file->clear_cache();
+-}
+-
+-
+-
++}
+\ No newline at end of file
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs_t.cpp b/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs_t.cpp
+new file mode 100644
+index 0000000..f8a6a06
+--- /dev/null
++++ b/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs_t.cpp
+@@ -0,0 +1,124 @@
++/*
++ * License: BSD 3-Clause "New" or "Revised" License
++ *
++ * Other web pages for this license
++ * http://www.opensource.org/licenses/BSD-3-Clause
++ *
++ * Copyright (C) 2018 Intel Corporation. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *
++ *   * Redistributions of source code must retain the above copyright
++ *     notice, this list of conditions and the following disclaimer.
++ *   * Redistributions in binary form must reproduce the above copyright
++ *     notice, this list of conditions and the following disclaimer in
++ *     the documentation and/or other materials provided with the
++ *     distribution.
++ *   * Neither the name of Intel Corporation nor the names of its
++ *     contributors may be used to endorse or promote products derived
++ *     from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ *
++ */
++
++#include "sgx_tprotected_fs_t.h"
++#include "sgx_tprotected_fs_u.h"
++
++
++sgx_status_t u_sgxprotectedfs_exclusive_file_open_wrap(void** retval, const char* filename, uint8_t read_only, int64_t* file_size, int32_t* error_code)
++{
++
++	*retval = u_sgxprotectedfs_exclusive_file_open(filename, read_only, file_size, error_code);
++	
++	return SGX_SUCCESS;
++
++}
++
++sgx_status_t u_sgxprotectedfs_check_if_file_exists_wrap(uint8_t* retval, const char* filename)
++{
++
++	*retval = u_sgxprotectedfs_check_if_file_exists(filename);
++
++	return SGX_SUCCESS;
++}
++
++sgx_status_t /*SGX_CDECL*/ u_sgxprotectedfs_fread_node_wrap(int32_t* retval, void* f, uint64_t node_number, uint8_t* buffer, uint32_t node_size)
++{
++
++	*retval = u_sgxprotectedfs_fread_node(f, node_number, buffer, node_size);
++	
++	return SGX_SUCCESS;
++}
++
++sgx_status_t /*SGX_CDECL*/ u_sgxprotectedfs_fwrite_node_wrap(int32_t* retval, void* f, uint64_t node_number, uint8_t* buffer, uint32_t node_size)
++{
++
++	*retval = u_sgxprotectedfs_fwrite_node(f, node_number, buffer, node_size);
++
++	return SGX_SUCCESS;
++
++}
++
++sgx_status_t /*SGX_CDECL*/ u_sgxprotectedfs_fclose_wrap(int32_t* retval, void* f)
++{
++	*retval = u_sgxprotectedfs_fclose(f);
++
++	return SGX_SUCCESS;
++
++}
++
++sgx_status_t /*SGX_CDECL*/ u_sgxprotectedfs_fflush_wrap(uint8_t* retval, void* f)
++{
++
++	*retval = u_sgxprotectedfs_fflush(f);
++
++	return SGX_SUCCESS;
++
++}
++
++sgx_status_t /*SGX_CDECL*/ u_sgxprotectedfs_remove_wrap(int32_t* retval, const char* filename)
++{
++	*retval = u_sgxprotectedfs_remove(filename);
++
++	return SGX_SUCCESS;
++
++}
++
++sgx_status_t /*SGX_CDECL*/ u_sgxprotectedfs_recovery_file_open_wrap(void** retval, const char* filename)
++{
++
++	*retval = u_sgxprotectedfs_recovery_file_open(filename);
++
++	return SGX_SUCCESS;
++}
++
++sgx_status_t /*SGX_CDECL*/ u_sgxprotectedfs_fwrite_recovery_node_wrap(uint8_t* retval, void* f, uint8_t* data, uint32_t data_length)
++{
++	*retval = u_sgxprotectedfs_fwrite_recovery_node(f, data, data_length);
++
++	return SGX_SUCCESS;
++
++}
++
++
++sgx_status_t /*SGX_CDECL*/ u_sgxprotectedfs_do_file_recovery_wrap(int32_t* retval, const char* filename, const char* recovery_filename, uint32_t node_size)
++{
++	
++	*retval = u_sgxprotectedfs_do_file_recovery(filename, recovery_filename, node_size);
++
++	return SGX_SUCCESS;
++
++}
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs_t.h b/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs_t.h
+new file mode 100644
+index 0000000..c9a44ba
+--- /dev/null
++++ b/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs_t.h
+@@ -0,0 +1,35 @@
++#ifndef SGX_TPROTECTED_FS_T_H__
++#define SGX_TPROTECTED_FS_T_H__
++
++#include <stdint.h>
++#include <wchar.h>
++#include <stddef.h>
++//#include "sgx_edger8r.h" /* for sgx_ocall etc. */
++
++
++#include <stdlib.h> /* for size_t */
++//#include "sgx_proxy_error.h"
++#include "sgx_error.h"
++
++#define SGX_CAST(type, item) ((type)(item))
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++sgx_status_t u_sgxprotectedfs_exclusive_file_open_wrap(void** retval, const char* filename, uint8_t read_only, int64_t* file_size, int32_t* error_code);
++sgx_status_t  u_sgxprotectedfs_check_if_file_exists_wrap(uint8_t* retval, const char* filename);
++sgx_status_t  u_sgxprotectedfs_fread_node_wrap(int32_t* retval, void* f, uint64_t node_number, uint8_t* buffer, uint32_t node_size);
++sgx_status_t  u_sgxprotectedfs_fwrite_node_wrap(int32_t* retval, void* f, uint64_t node_number, uint8_t* buffer, uint32_t node_size);
++sgx_status_t  u_sgxprotectedfs_fclose_wrap(int32_t* retval, void* f);
++sgx_status_t  u_sgxprotectedfs_fflush_wrap(uint8_t* retval, void* f);
++sgx_status_t  u_sgxprotectedfs_remove_wrap(int32_t* retval, const char* filename);
++sgx_status_t  u_sgxprotectedfs_recovery_file_open_wrap(void** retval, const char* filename);
++sgx_status_t  u_sgxprotectedfs_fwrite_recovery_node_wrap(uint8_t* retval, void* f, uint8_t* data, uint32_t data_length);
++sgx_status_t  u_sgxprotectedfs_do_file_recovery_wrap(int32_t* retval, const char* filename, const char* recovery_filename, uint32_t node_size);
++
++#ifdef __cplusplus
++}
++#endif /* __cplusplus */
++
++#endif
+diff --git a/sdk/protected_fs/sgx_uprotected_fs/sgx_tprotected_fs_u.h b/sdk/protected_fs/sgx_uprotected_fs/sgx_tprotected_fs_u.h
+new file mode 100644
+index 0000000..60353a6
+--- /dev/null
++++ b/sdk/protected_fs/sgx_uprotected_fs/sgx_tprotected_fs_u.h
+@@ -0,0 +1,34 @@
++#ifndef SGX_TPROTECTED_FS_U_H__
++#define SGX_TPROTECTED_FS_U_H__
++
++#include <stdint.h>
++#include <wchar.h>
++#include <stddef.h>
++#include <string.h>
++//#include "sgx_edger8r.h" /* for sgx_satus_t etc. */
++
++
++#include <stdlib.h> /* for size_t */
++
++//#define SGX_CAST(type, item) ((type)(item))
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++void * u_sgxprotectedfs_exclusive_file_open(const char* filename, uint8_t read_only, int64_t* file_size, int32_t* error_code);
++uint8_t u_sgxprotectedfs_check_if_file_exists(const char* filename);
++int32_t u_sgxprotectedfs_fread_node(void* f, uint64_t node_number, uint8_t* buffer, uint32_t node_size);
++int32_t u_sgxprotectedfs_fwrite_node(void* f, uint64_t node_number, uint8_t* buffer, uint32_t node_size);
++int32_t u_sgxprotectedfs_fclose(void* f);
++uint8_t u_sgxprotectedfs_fflush(void* f);
++int32_t u_sgxprotectedfs_remove(const char* filename);
++void* u_sgxprotectedfs_recovery_file_open(const char* filename);
++uint8_t u_sgxprotectedfs_fwrite_recovery_node(void* f, uint8_t* data, uint32_t data_length);
++int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* recovery_filename, uint32_t node_size);
++
++#ifdef __cplusplus
++}
++#endif /* __cplusplus */
++
++#endif
+diff --git a/sdk/protected_fs/sgx_uprotected_fs/sgx_uprotected_fs.cpp b/sdk/protected_fs/sgx_uprotected_fs/sgx_uprotected_fs.cpp
+index 2226ced..2124e1c 100644
+--- a/sdk/protected_fs/sgx_uprotected_fs/sgx_uprotected_fs.cpp
++++ b/sdk/protected_fs/sgx_uprotected_fs/sgx_uprotected_fs.cpp
+@@ -41,16 +41,18 @@
+ #include <fcntl.h>
+ 
+ #include "sgx_tprotected_fs_u.h"
+-#include <uprotected_fs.h>
+ 
++#include <dlfcn.h>
++#include "fileops_typedefs.h"
++
++//#define DEBUG
+ 
+ #ifdef DEBUG
+-#define DEBUG_PRINT(fmt, args...) fprintf(stderr, "[sgx_uprotected_fs.h:%d] " fmt, __LINE__, ##args)
++#define DEBUG_PRINT(fmt, args...) printf("\n[sgx_uprotected_fs.cpp:%d] " fmt, __LINE__, ##args)
+ #else
+ #define DEBUG_PRINT(...)
+ #endif
+ 
+-
+ void* u_sgxprotectedfs_exclusive_file_open(const char* filename, uint8_t read_only, int64_t* file_size, int32_t* error_code)
+ {
+ 	FILE* f = NULL;
+@@ -69,16 +71,19 @@ void* u_sgxprotectedfs_exclusive_file_open(const char* filename, uint8_t read_on
+ 	}
+ 
+ 	// open the file with OS API so we can 'lock' the file and get exclusive access to it
+-	fd = open(filename,	O_CREAT | (read_only ? O_RDONLY : O_RDWR) | O_LARGEFILE, mode); // create the file if it doesn't exists, read-only/read-write
++	fd = open_fn_glb(filename,	O_CREAT | (read_only ? O_RDONLY : O_RDWR) | O_LARGEFILE, mode); // create the file if it doesn't exists, read-only/read-write
+ 	if (fd == -1)
+ 	{
+ 		DEBUG_PRINT("open returned %d, errno %d\n", result, errno);
++		DEBUG_PRINT("filename->%s, passed to open\n", filename);
+ 		*error_code = errno;
+ 		return NULL;
+ 	}
+ 
+ 	// this lock is advisory only and programs with high priviliges can ignore it
+ 	// it is set to help the user avoid mistakes, but it won't prevent intensional DOS attack from priviliged user
++	/*Note: graphene's glibc api, does not support flock(returns ENOSYS).*/
++    /* 
+ 	result = flock(fd, (read_only ? LOCK_SH : LOCK_EX) | LOCK_NB); // NB - non blocking
+ 	if (result != 0)
+ 	{
+@@ -88,13 +93,14 @@ void* u_sgxprotectedfs_exclusive_file_open(const char* filename, uint8_t read_on
+ 		assert(result == 0);
+ 		return NULL;
+ 	}
++    */
+ 
+ 	result = fstat(fd, &stat_st);
+ 	if (result != 0)
+ 	{
+ 		DEBUG_PRINT("fstat returned %d, errno %d\n", result, errno);
+ 		*error_code = errno;
+-		flock(fd, LOCK_UN);
++		//flock(fd, LOCK_UN);
+ 		result = close(fd);
+ 		assert(result == 0);
+ 		return NULL;
+@@ -106,7 +112,7 @@ void* u_sgxprotectedfs_exclusive_file_open(const char* filename, uint8_t read_on
+ 	{
+ 		DEBUG_PRINT("fdopen returned NULL\n");
+ 		*error_code = errno;
+-		flock(fd, LOCK_UN);
++		//flock(fd, LOCK_UN);
+ 		result = close(fd);
+ 		assert(result == 0);
+ 		return NULL;
+@@ -131,6 +137,8 @@ uint8_t u_sgxprotectedfs_check_if_file_exists(const char* filename)
+ 		return 1;
+ 	}
+ 	
++	DEBUG_PRINT("filename=%s\n", filename);
++
+ 	return (stat(filename, &stat_st) == 0); 
+ }
+ 
+@@ -148,7 +156,7 @@ int32_t u_sgxprotectedfs_fread_node(void* f, uint64_t node_number, uint8_t* buff
+ 		return -1;
+ 	}
+ 
+-	if ((result = fseeko(file, offset, SEEK_SET)) != 0)
++	if ((result = fseeko_fn_glb(file, offset, SEEK_SET)) != 0)
+ 	{
+ 		DEBUG_PRINT("fseeko returned %d\n", result);
+ 		if (errno != 0)
+@@ -160,9 +168,9 @@ int32_t u_sgxprotectedfs_fread_node(void* f, uint64_t node_number, uint8_t* buff
+ 			return -1;
+ 	}
+ 
+-	if ((size = fread(buffer, node_size, 1, file)) != 1)
++	if ((size = fread_fn_glb(buffer, node_size, 1, file)) != 1)
+ 	{
+-		int err = ferror(file);
++		int err = ferror_fn_glb(file);
+ 		if (err != 0)
+ 		{
+ 			DEBUG_PRINT("fread returned %ld [!= 1], ferror: %d\n", size, err);
+@@ -198,7 +206,7 @@ int32_t u_sgxprotectedfs_fwrite_node(void* f, uint64_t node_number, uint8_t* buf
+ 		return -1;
+ 	}
+ 
+-	if ((result = fseeko(file, offset, SEEK_SET)) != 0)
++	if ((result = fseeko_fn_glb(file, offset, SEEK_SET)) != 0)
+ 	{
+ 		DEBUG_PRINT("fseeko returned %d\n", result);
+ 		if (errno != 0)
+@@ -210,10 +218,10 @@ int32_t u_sgxprotectedfs_fwrite_node(void* f, uint64_t node_number, uint8_t* buf
+ 			return -1;
+ 	}
+ 
+-	if ((size = fwrite(buffer, node_size, 1, file)) != 1)
++	if ((size = fwrite_fn_glb(buffer, node_size, 1, file)) != 1)
+ 	{
+ 		DEBUG_PRINT("fwrite returned %ld [!= 1]\n", size);
+-		int err = ferror(file);
++		int err = ferror_fn_glb(file);
+ 		if (err != 0)
+ 			return err;
+ 		else if (errno != 0)
+@@ -242,13 +250,13 @@ int32_t u_sgxprotectedfs_fclose(void* f)
+ 	}
+ 
+ 	// closing the file handle should also remove the lock, but we try to remove it explicitly
+-	fd = fileno(file);
++	fd = fileno_fn_glb(file);
+ 	if (fd == -1)
+ 		DEBUG_PRINT("fileno returned -1\n");
+-	else
+-		flock(fd, LOCK_UN);
++	/*else
++		flock(fd, LOCK_UN);*/
+ 	
+-	if ((result = fclose(file)) != 0)
++	if ((result = fclose_fn_glb(file)) != 0)
+ 	{
+ 		if (errno != 0)
+ 		{
+@@ -256,7 +264,7 @@ int32_t u_sgxprotectedfs_fclose(void* f)
+ 			DEBUG_PRINT("fclose returned %d, errno: %d\n", result, err);
+ 			return err;
+ 		}
+-		DEBUG_PRINT("fclose returned %d\n", result);
++		DEBUG_PRINT("fclose_fn_glb returned %d\n", result);
+ 		return -1;
+ 	}
+ 
+@@ -275,7 +283,7 @@ uint8_t u_sgxprotectedfs_fflush(void* f)
+ 		return 1;
+ 	}
+ 	
+-	if ((result = fflush(file)) != 0)
++	if ((result = fflush_fn_glb(file)) != 0)
+ 	{
+ 		DEBUG_PRINT("fflush returned %d\n", result);
+ 		return 1;
+@@ -295,7 +303,7 @@ int32_t u_sgxprotectedfs_remove(const char* filename)
+ 		return -1;
+ 	}
+ 
+-	if ((result = remove(filename)) != 0)
++	if ((result = remove_fn_glb(filename)) != 0)
+ 	{// this function is called from the destructor which is called when calling fclose, if there were no writes, there is no recovery file...we don't want endless prints...
+ 		//DEBUG_PRINT("remove returned %d\n", result);
+ 		if (errno != 0)
+@@ -320,7 +328,7 @@ void* u_sgxprotectedfs_recovery_file_open(const char* filename)
+ 	
+ 	for (int i = 0; i < MAX_FOPEN_RETRIES; i++)
+ 	{
+-		f = fopen(filename, "wb");
++		f = fopen_fn_glb(filename, "wb");
+ 		if (f != NULL)
+ 			break;
+ 		usleep(MILISECONDS_SLEEP_FOPEN);
+@@ -346,7 +354,7 @@ uint8_t u_sgxprotectedfs_fwrite_recovery_node(void* f, uint8_t* data, uint32_t d
+ 	}
+ 		
+ 	// recovery nodes are written sequentially
+-	size_t count = fwrite(data, 1, data_length, file);
++	size_t count = fwrite_fn_glb(data, 1, data_length, file);
+ 	if (count != data_length)
+ 	{
+ 		DEBUG_PRINT("fwrite returned %ld instead of %d\n", count, data_length);
+@@ -385,7 +393,7 @@ int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* reco
+ 			return (int32_t)NULL;
+ 		}
+ 	
+-		recovery_file = fopen(recovery_filename, "rb");
++		recovery_file = fopen_fn_glb(recovery_filename, "rb");
+ 		if (recovery_file == NULL)
+ 		{
+ 			DEBUG_PRINT("fopen of recovery file returned NULL - no recovery file exists\n");
+@@ -393,7 +401,7 @@ int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* reco
+ 			break;
+ 		}
+ 
+-		if ((result = fseeko(recovery_file, 0, SEEK_END)) != 0)
++		if ((result = fseeko_fn_glb(recovery_file, 0, SEEK_END)) != 0)
+ 		{
+ 			DEBUG_PRINT("fseeko returned %d\n", result);
+ 			if (errno != 0)
+@@ -401,9 +409,9 @@ int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* reco
+ 			break;
+ 		}
+ 
+-		file_size = ftello(recovery_file);
++		file_size = ftello_fn_glb(recovery_file);
+ 	
+-		if ((result = fseeko(recovery_file, 0, SEEK_SET)) != 0)
++		if ((result = fseeko_fn_glb(recovery_file, 0, SEEK_SET)) != 0)
+ 		{
+ 			DEBUG_PRINT("fseeko returned %d\n", result);
+ 			if (errno != 0)
+@@ -429,7 +437,7 @@ int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* reco
+ 			break;
+ 		}
+ 
+-		source_file = fopen(filename, "r+b");
++		source_file = fopen_fn_glb(filename, "r+b");
+ 		if (source_file == NULL)
+ 		{
+ 			DEBUG_PRINT("fopen returned NULL\n");
+@@ -439,10 +447,10 @@ int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* reco
+ 
+ 		for (i = 0 ; i < nodes_count ; i++)
+ 		{
+-			if ((count = fread(recovery_node, recovery_node_size, 1, recovery_file)) != 1)
++			if ((count = fread_fn_glb(recovery_node, recovery_node_size, 1, recovery_file)) != 1)
+ 			{
+ 				DEBUG_PRINT("fread returned %ld [!= 1]\n", count);
+-				err = ferror(recovery_file);
++				err = ferror_fn_glb(recovery_file);
+ 				if (err != 0)
+ 					ret = err;
+ 				else if (errno != 0) 
+@@ -451,7 +459,7 @@ int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* reco
+ 			}
+ 
+ 			// seek the regular file to the required offset
+-			if ((result = fseeko(source_file, (*((uint64_t*)recovery_node)) * node_size, SEEK_SET)) != 0)
++			if ((result = fseeko_fn_glb(source_file, (*((uint64_t*)recovery_node)) * node_size, SEEK_SET)) != 0)
+ 			{
+ 				DEBUG_PRINT("fseeko returned %d\n", result);
+ 				if (errno != 0)
+@@ -460,10 +468,10 @@ int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* reco
+ 			}
+ 
+ 			// write down the original data from the recovery file
+-			if ((count = fwrite(&recovery_node[sizeof(uint64_t)], node_size, 1, source_file)) != 1)
++			if ((count = fwrite_fn_glb(&recovery_node[sizeof(uint64_t)], node_size, 1, source_file)) != 1)
+ 			{
+ 				DEBUG_PRINT("fwrite returned %ld [!= 1]\n", count);
+-				err = ferror(source_file);
++				err = ferror_fn_glb(source_file);
+ 				if (err != 0)
+ 					ret = err;
+ 				else if (errno != 0) 
+@@ -475,7 +483,7 @@ int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* reco
+ 		if (i != nodes_count) // the 'for' loop exited with error
+ 			break;
+ 
+-		if ((result = fflush(source_file)) != 0)
++		if ((result = fflush_fn_glb(source_file)) != 0)
+ 		{
+ 			DEBUG_PRINT("fflush returned %d\n", result);
+ 			ret = result;
+@@ -491,18 +499,18 @@ int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* reco
+ 
+ 	if (source_file != NULL)
+ 	{
+-		result = fclose(source_file);
++		result = fclose_fn_glb(source_file);
+ 		assert(result == 0);
+ 	}
+ 
+ 	if (recovery_file != NULL)
+ 	{
+-		result = fclose(recovery_file);
++		result = fclose_fn_glb(recovery_file);
+ 		assert(result == 0);
+ 	}
+ 
+ 	if (ret == 0)
+-		remove(recovery_filename);
++		remove_fn_glb(recovery_filename);
+ 	
+ 	return ret;
+ }
+-- 
+2.19.0
+
