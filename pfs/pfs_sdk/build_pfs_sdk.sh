@@ -15,9 +15,12 @@ echo "sdk/protected_fs/*" > .git/info/sparse-checkout
 git checkout sgx_2.1.3 -b changes_over_sdk_2.1.3
 
 #TODO: Add check if (patch_file_exists) at the start of this script...
-git am changes_on_sdk_2.1.3.patch  || exit 1
+#git am changes_on_sdk_2.1.3.patch  || exit 1
+#C_based_changes_plus_previous_changes_on_sdk_2.1.3.patch
+git am C_based_changes_plus_previous_changes_on_sdk_2.1.3.patch  || exit 1
+
 fi
 
 #TODO: Add check for build errors and exit.
-make -fMakefile_pfs_sdk clean  || exit 1
-make -fMakefile_pfs_sdk all  || exit 1
+#make -fMakefile_pfs_sdk clean  || exit 1
+#make -fMakefile_pfs_sdk all  || exit 1
