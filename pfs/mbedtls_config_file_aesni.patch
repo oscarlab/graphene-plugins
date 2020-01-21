@@ -1,0 +1,158 @@
+diff --git a/include/mbedtls/config.h b/include/mbedtls/config.h
+index 654f9725e..243c118ee 100644
+--- a/include/mbedtls/config.h
++++ b/include/mbedtls/config.h
+@@ -704,7 +704,7 @@
+  *
+  * Comment this macro to keep 3DES in the default ciphersuite list.
+  */
+-#define MBEDTLS_REMOVE_3DES_CIPHERSUITES
++//#define MBEDTLS_REMOVE_3DES_CIPHERSUITES
+ 
+ /**
+  * \def MBEDTLS_ECP_DP_SECP192R1_ENABLED
+@@ -1864,7 +1864,7 @@
+  *            it, and considering stronger ciphers instead.
+  *
+  */
+-#define MBEDTLS_ARC4_C
++//#define MBEDTLS_ARC4_C
+ 
+ /**
+  * \def MBEDTLS_ASN1_PARSE_C
+@@ -1930,7 +1930,7 @@
+  *
+  * Module:  library/blowfish.c
+  */
+-#define MBEDTLS_BLOWFISH_C
++//#define MBEDTLS_BLOWFISH_C
+ 
+ /**
+  * \def MBEDTLS_CAMELLIA_C
+@@ -1985,7 +1985,7 @@
+  *      MBEDTLS_TLS_PSK_WITH_CAMELLIA_128_GCM_SHA256
+  *      MBEDTLS_TLS_PSK_WITH_CAMELLIA_128_CBC_SHA256
+  */
+-#define MBEDTLS_CAMELLIA_C
++//#define MBEDTLS_CAMELLIA_C
+ 
+ /**
+  * \def MBEDTLS_ARIA_C
+@@ -2072,7 +2072,7 @@
+  *
+  * Module:  library/chacha20.c
+  */
+-#define MBEDTLS_CHACHA20_C
++//#define MBEDTLS_CHACHA20_C
+ 
+ /**
+  * \def MBEDTLS_CHACHAPOLY_C
+@@ -2083,7 +2083,7 @@
+  *
+  * This module requires: MBEDTLS_CHACHA20_C, MBEDTLS_POLY1305_C
+  */
+-#define MBEDTLS_CHACHAPOLY_C
++//#define MBEDTLS_CHACHAPOLY_C
+ 
+ /**
+  * \def MBEDTLS_CIPHER_C
+@@ -2108,7 +2108,7 @@
+  * Requires: MBEDTLS_AES_C or MBEDTLS_DES_C
+  *
+  */
+-//#define MBEDTLS_CMAC_C
++#define MBEDTLS_CMAC_C
+ 
+ /**
+  * \def MBEDTLS_CTR_DRBG_C
+@@ -2167,7 +2167,7 @@
+  * \warning   DES is considered a weak cipher and its use constitutes a
+  *            security risk. We recommend considering stronger ciphers instead.
+  */
+-#define MBEDTLS_DES_C
++//#define MBEDTLS_DES_C
+ 
+ /**
+  * \def MBEDTLS_DHM_C
+diff --git a/library/aes.c b/library/aes.c
+index aff0a9939..f2bbeffce 100644
+--- a/library/aes.c
++++ b/library/aes.c
+@@ -591,6 +591,12 @@ int mbedtls_aes_setkey_enc( mbedtls_aes_context *ctx, const unsigned char *key,
+ #if defined(MBEDTLS_AESNI_C) && defined(MBEDTLS_HAVE_X86_64)
+     if( mbedtls_aesni_has_support( MBEDTLS_AESNI_AES ) )
+         return( mbedtls_aesni_setkey_enc( (unsigned char *) ctx->rk, key, keybits ) );
++	else
++	{   //SW implementation of AES, is not sufficiently protected against side-channel attacks.
++		return MBEDTLS_ERR_AES_FEATURE_UNAVAILABLE;
++	}
++#else
++	return MBEDTLS_ERR_AES_FEATURE_UNAVAILABLE;
+ #endif
+ 
+     for( i = 0; i < ( keybits >> 5 ); i++ )
+@@ -705,8 +711,15 @@ int mbedtls_aes_setkey_dec( mbedtls_aes_context *ctx, const unsigned char *key,
+                            (const unsigned char *) cty.rk, ctx->nr );
+         goto exit;
+     }
++	else
++	{   //SW implementation of AES, is not sufficiently protected against side-channel attacks.
++		return MBEDTLS_ERR_AES_FEATURE_UNAVAILABLE;
++	}
++#else
++	return MBEDTLS_ERR_AES_FEATURE_UNAVAILABLE;
+ #endif
+ 
++
+     SK = cty.rk + cty.nr * 4;
+ 
+     *RK++ = *SK++;
+@@ -1016,8 +1029,15 @@ int mbedtls_aes_crypt_ecb( mbedtls_aes_context *ctx,
+ #if defined(MBEDTLS_AESNI_C) && defined(MBEDTLS_HAVE_X86_64)
+     if( mbedtls_aesni_has_support( MBEDTLS_AESNI_AES ) )
+         return( mbedtls_aesni_crypt_ecb( ctx, mode, input, output ) );
++	else
++	{   //SW implementation of AES, is not sufficiently protected against side-channel attacks.
++		return MBEDTLS_ERR_AES_FEATURE_UNAVAILABLE;
++	}
++#else
++	return MBEDTLS_ERR_AES_FEATURE_UNAVAILABLE;
+ #endif
+ 
++
+ #if defined(MBEDTLS_PADLOCK_C) && defined(MBEDTLS_HAVE_X86)
+     if( aes_padlock_ace )
+     {
+diff --git a/library/gcm.c b/library/gcm.c
+index 675926a51..5b12f65a2 100644
+--- a/library/gcm.c
++++ b/library/gcm.c
+@@ -132,8 +132,15 @@ static int gcm_gen_table( mbedtls_gcm_context *ctx )
+     /* With CLMUL support, we need only h, not the rest of the table */
+     if( mbedtls_aesni_has_support( MBEDTLS_AESNI_CLMUL ) )
+         return( 0 );
++	else
++	{   //SW implementation of AES, is not sufficiently protected against side-channel attacks.
++		return MBEDTLS_ERR_AES_FEATURE_UNAVAILABLE;
++	}
++#else
++	return MBEDTLS_ERR_AES_FEATURE_UNAVAILABLE;
+ #endif
+ 
++
+     /* 0 corresponds to 0 in GF(2^128) */
+     ctx->HH[0] = 0;
+     ctx->HL[0] = 0;
+@@ -235,6 +242,12 @@ static void gcm_mult( mbedtls_gcm_context *ctx, const unsigned char x[16],
+         mbedtls_aesni_gcm_mult( output, x, h );
+         return;
+     }
++	else
++	{   //SW implementation of AES, is not sufficiently protected against side-channel attacks.
++		return;
++	}
++#else
++	return;
+ #endif /* MBEDTLS_AESNI_C && MBEDTLS_HAVE_X86_64 */
+ 
+     lo = x[15] & 0xf;

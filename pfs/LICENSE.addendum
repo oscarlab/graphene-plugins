@@ -1,0 +1,8 @@
+Graphene-Filesystem-shield(GFS) is licensed under BSD.
+
+GFS also uses the following sources (and licenses):
+
+Sources from Intel's SGX SDK(in pfs_proxy folder)  - BSD
+Patched sources for SGX SDK's protected-fs library - BSD
+Base64 encoding/decoding                           - BSD
+

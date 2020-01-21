@@ -1,0 +1,5310 @@
+From 36c140f972571450c18714bbecab814d4adad171 Mon Sep 17 00:00:00 2001
+From: "Krishnakumar, Sudha" <sudha.krishnakumar@intel.com>
+Date: Mon, 22 Jul 2019 14:31:52 -0700
+Subject: [PATCH 1/2] Squashed commits to get one commit for code changes on
+ top of linux_sgx_2.1.3, to build 1 combined protectedfs library changes,
+ without sgx(ecall/ocall dependencies) and also compatible with graphene.
+
+Cleaned up some remnants, to get a clean patch, without any build
+or steps related artifacts.
+
+Disabled DEBUG in sgx_uprotectedfs.cpp
+---
+ .../sgx_tprotected_fs/file_crypto.cpp         |  31 ++++-
+ .../sgx_tprotected_fs/file_flush.cpp          |  58 ++++----
+ .../sgx_tprotected_fs/file_init.cpp           |  38 ++++--
+ .../sgx_tprotected_fs/file_other.cpp          |   4 +-
+ .../sgx_tprotected_fs/file_read_write.cpp     |  21 ++-
+ .../sgx_tprotected_fs/protected_fs_file.h     |  17 ++-
+ .../sgx_tprotected_fs/protected_fs_nodes.h    |   1 +
+ .../sgx_tprotected_fs/sgx_tprotected_fs.cpp   |   5 +-
+ .../sgx_tprotected_fs/sgx_tprotected_fs_t.cpp | 124 ++++++++++++++++++
+ .../sgx_tprotected_fs/sgx_tprotected_fs_t.h   |  35 +++++
+ .../sgx_uprotected_fs/sgx_tprotected_fs_u.h   |  34 +++++
+ .../sgx_uprotected_fs/sgx_uprotected_fs.cpp   |  78 ++++++-----
+ 12 files changed, 349 insertions(+), 97 deletions(-)
+ create mode 100644 sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs_t.cpp
+ create mode 100644 sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs_t.h
+ create mode 100644 sdk/protected_fs/sgx_uprotected_fs/sgx_tprotected_fs_u.h
+
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/file_crypto.cpp b/sdk/protected_fs/sgx_tprotected_fs/file_crypto.cpp
+index b9a5645..7030028 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/file_crypto.cpp
++++ b/sdk/protected_fs/sgx_tprotected_fs/file_crypto.cpp
+@@ -32,8 +32,15 @@
+ #include "protected_fs_file.h"
+ #include <tseal_migration_attr.h>
+ 
+-#include <sgx_utils.h>
+-#include <sgx_trts.h>
++#include "sgx_proxy_sdk_tlibc.h"
++#include "sgx_attributes.h"
++#include "sgx_utils.h"
++
++#include "protfs_debug.h"
++
++//Note: sgx_trts.h has sgx_read_rand defn.
++#include "sgx_proxy_rand.h"
++//#include "sgx_trts.h"
+ 
+ #define MASTER_KEY_NAME      "SGX-PROTECTED-FS-MASTER-KEY"
+ #define RANDOM_KEY_NAME      "SGX-PROTECTED-FS-RANDOM-KEY"
+@@ -56,7 +63,9 @@ typedef struct {
+ 
+ bool protected_fs_file::generate_secure_blob(sgx_aes_gcm_128bit_key_t* key, const char* label, uint64_t physical_node_number, sgx_aes_gcm_128bit_tag_t* output)
+ {
++
+ 	kdf_input_t buf = {0, "", 0, "", 0};
++	sgx_status_t status;
+ 
+ 	uint32_t len = (uint32_t)strnlen(label, MAX_LABEL_LEN + 1);
+ 	if (len > MAX_LABEL_LEN)
+@@ -83,7 +92,7 @@ bool protected_fs_file::generate_secure_blob(sgx_aes_gcm_128bit_key_t* key, cons
+ 	//           optionally, a nonce known by the parties who derive the keys.
+ 	buf.node_number = physical_node_number;
+ 
+-	sgx_status_t status = sgx_read_rand((unsigned char*)&(buf.nonce16), sizeof(sgx_cmac_128bit_tag_t));
++	status = sgx_read_rand((unsigned char*)&(buf.nonce16), sizeof(sgx_cmac_128bit_tag_t));
+ 	if (status != SGX_SUCCESS)
+ 	{
+ 		last_error = status;
+@@ -94,6 +103,9 @@ bool protected_fs_file::generate_secure_blob(sgx_aes_gcm_128bit_key_t* key, cons
+ 	buf.output_len = 0x80;
+ 
+ 	status = sgx_rijndael128_cmac_msg(key, (const uint8_t*)&buf, sizeof(kdf_input_t), output);
++
++        DBG_PRINT("\nafter sgx_cmac_msg, status=%d\n", (int)status);
++
+ 	if (status != SGX_SUCCESS)
+ 	{
+ 		last_error = status;
+@@ -149,6 +161,9 @@ bool protected_fs_file::generate_secure_blob_from_user_kdk(bool restore)
+ 	buf.output_len = 0x80;
+ 
+ 	status = sgx_rijndael128_cmac_msg(&user_kdk_key, (const uint8_t*)&buf, sizeof(kdf_input_t), &cur_key);
++
++        DBG_PRINT("\nafter sgx_cmac_msg, status=%d\n", (int)status);
++
+ 	if (status != SGX_SUCCESS)
+ 	{
+ 		last_error = status;
+@@ -211,9 +226,14 @@ bool protected_fs_file::generate_random_meta_data_key()
+ 	memcpy(&key_request.cpu_svn, &report.body.cpu_svn, sizeof(sgx_cpu_svn_t));
+ 	memcpy(&key_request.isv_svn, &report.body.isv_svn, sizeof(sgx_isv_svn_t));
+ 
++#ifdef PROTFS_DEBUG
++	DBG_PRINT("");
++	PRINT_BUF("CPU_SVN", (uint8_t *)&report.body.cpu_svn, sizeof(sgx_cpu_svn_t));
++	PRINT_BUF("ISV_SVN", (uint8_t *)&report.body.isv_svn, sizeof(sgx_isv_svn_t));
++#endif
++
+     key_request.attribute_mask.flags = TSEAL_DEFAULT_FLAGSMASK;
+     key_request.attribute_mask.xfrm = 0x0;
+-
+ 	key_request.misc_mask = TSEAL_DEFAULT_MISCMASK;
+ 		
+ 	sgx_status_t status = sgx_read_rand((unsigned char*)&key_request.key_id, sizeof(sgx_key_id_t));
+@@ -265,9 +285,8 @@ bool protected_fs_file::restore_current_meta_data_key(const sgx_aes_gcm_128bit_k
+ 	key_request.key_name = SGX_KEYSELECT_SEAL;
+ 	key_request.key_policy = SGX_KEYPOLICY_MRSIGNER;
+ 
+-	key_request.attribute_mask.flags = TSEAL_DEFAULT_FLAGSMASK;
++    key_request.attribute_mask.flags = TSEAL_DEFAULT_FLAGSMASK;
+     key_request.attribute_mask.xfrm = 0x0;
+-
+ 	key_request.misc_mask = TSEAL_DEFAULT_MISCMASK;
+ 
+ 	memcpy(&key_request.cpu_svn, &file_meta_data.plain_part.cpu_svn, sizeof(sgx_cpu_svn_t));
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/file_flush.cpp b/sdk/protected_fs/sgx_tprotected_fs/file_flush.cpp
+index be43c51..a1f0109 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/file_flush.cpp
++++ b/sdk/protected_fs/sgx_tprotected_fs/file_flush.cpp
+@@ -34,9 +34,6 @@
+ #include "protected_fs_file.h"
+ #include <tprotected_fs.h>
+ 
+-
+-#include <sgx_trts.h>
+-
+ bool protected_fs_file::flush(/*bool mc*/)
+ {
+ 	bool result = false;
+@@ -181,7 +178,7 @@ bool protected_fs_file::write_recovery_file()
+ 	uint8_t result = 0;
+ 	int32_t result32 = 0;
+ 
+-	status = u_sgxprotectedfs_recovery_file_open(&recovery_file, recovery_filename);
++	status = (sgx_status_t)u_sgxprotectedfs_recovery_file_open_wrap(&recovery_file, recovery_filename);
+ 	if (status != SGX_SUCCESS || recovery_file == NULL)
+ 	{
+ 		last_error = status != SGX_SUCCESS ? status : SGX_ERROR_FILE_CANT_OPEN_RECOVERY_FILE;
+@@ -211,11 +208,11 @@ bool protected_fs_file::write_recovery_file()
+ 			recovery_node = &file_mht_node->recovery_node;
+ 		}
+ 
+-		status = u_sgxprotectedfs_fwrite_recovery_node(&result, recovery_file, (uint8_t*)recovery_node, sizeof(recovery_node_t));
++		status = (sgx_status_t)u_sgxprotectedfs_fwrite_recovery_node_wrap(&result, recovery_file, (uint8_t*)recovery_node, sizeof(recovery_node_t));
+ 		if (status != SGX_SUCCESS || result != 0)
+ 		{
+-			u_sgxprotectedfs_fclose(&result32, recovery_file);
+-			u_sgxprotectedfs_remove(&result32, recovery_filename);
++			u_sgxprotectedfs_fclose_wrap(&result32, recovery_file);
++			u_sgxprotectedfs_remove_wrap(&result32, recovery_filename);
+ 			last_error = status != SGX_SUCCESS ? status : SGX_ERROR_FILE_CANT_WRITE_RECOVERY_FILE;
+ 			return false;
+ 		}
+@@ -223,26 +220,26 @@ bool protected_fs_file::write_recovery_file()
+ 
+ 	if (root_mht.need_writing == true && root_mht.new_node == false)
+ 	{
+-		status = u_sgxprotectedfs_fwrite_recovery_node(&result, recovery_file, (uint8_t*)&root_mht.recovery_node, sizeof(recovery_node_t));
++		status = (sgx_status_t)u_sgxprotectedfs_fwrite_recovery_node_wrap(&result, recovery_file, (uint8_t*)&root_mht.recovery_node, sizeof(recovery_node_t));
+ 		if (status != SGX_SUCCESS || result != 0)
+ 		{
+-			u_sgxprotectedfs_fclose(&result32, recovery_file);
+-			u_sgxprotectedfs_remove(&result32, recovery_filename);
++			u_sgxprotectedfs_fclose_wrap(&result32, recovery_file);
++			u_sgxprotectedfs_remove_wrap(&result32, recovery_filename);
+ 			last_error = status != SGX_SUCCESS ? status : SGX_ERROR_FILE_CANT_WRITE_RECOVERY_FILE;
+ 			return false;
+ 		}
+ 	}
+ 
+-	status = u_sgxprotectedfs_fwrite_recovery_node(&result, recovery_file, (uint8_t*)&meta_data_recovery_node, sizeof(recovery_node_t));
++	status = (sgx_status_t)u_sgxprotectedfs_fwrite_recovery_node_wrap(&result, recovery_file, (uint8_t*)&meta_data_recovery_node, sizeof(recovery_node_t));
+ 	if (status != SGX_SUCCESS || result != 0)
+ 	{
+-		u_sgxprotectedfs_fclose(&result32, recovery_file);
+-		u_sgxprotectedfs_remove(&result32, recovery_filename);
++		u_sgxprotectedfs_fclose_wrap(&result32, recovery_file);
++		u_sgxprotectedfs_remove_wrap(&result32, recovery_filename);
+ 		last_error = status != SGX_SUCCESS ? status : SGX_ERROR_FILE_CANT_WRITE_RECOVERY_FILE;
+ 		return false;
+ 	}
+ 
+-	u_sgxprotectedfs_fclose(&result32, recovery_file); // TODO - check result
++	u_sgxprotectedfs_fclose_wrap(&result32, recovery_file); // TODO - check result
+ 
+ 	return true;
+ }
+@@ -255,7 +252,7 @@ bool protected_fs_file::set_update_flag(bool flush_to_disk)
+ 	int32_t result32;
+ 
+ 	file_meta_data.plain_part.update_flag = 1;
+-	status = u_sgxprotectedfs_fwrite_node(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
++	status = (sgx_status_t)u_sgxprotectedfs_fwrite_node_wrap(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
+ 	file_meta_data.plain_part.update_flag = 0; // turn it off in memory. at the end of the flush, when we'll write the meta-data to disk, this flag will also be cleared there.
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+@@ -266,11 +263,11 @@ bool protected_fs_file::set_update_flag(bool flush_to_disk)
+ 
+ 	if (flush_to_disk == true)
+ 	{
+-		status = u_sgxprotectedfs_fflush(&result, file);
++		status = (sgx_status_t)u_sgxprotectedfs_fflush_wrap(&result, file);
+ 		if (status != SGX_SUCCESS || result != 0)
+ 		{
+ 			last_error = status != SGX_SUCCESS ? status : SGX_ERROR_FILE_FLUSH_FAILED;
+-			u_sgxprotectedfs_fwrite_node(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE); // try to clear the update flag, in the OS cache at least...
++			u_sgxprotectedfs_fwrite_node_wrap(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE); // try to clear the update flag, in the OS cache at least...
+ 			return false;
+ 		}
+ 
+@@ -290,8 +287,8 @@ void protected_fs_file::clear_update_flag()
+ 	if (_RECOVERY_HOOK_(3))
+ 		return;
+ 	assert(file_meta_data.plain_part.update_flag == 0);
+-	u_sgxprotectedfs_fwrite_node(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
+-	u_sgxprotectedfs_fflush(&result, file);
++	u_sgxprotectedfs_fwrite_node_wrap(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
++	u_sgxprotectedfs_fflush_wrap(&result, file);
+ }
+ 
+ 
+@@ -329,6 +326,9 @@ bool protected_fs_file::update_all_data_and_mht_nodes()
+ 				// encrypt the data, this also saves the gmac of the operation in the mht crypto node
+ 				status = sgx_rijndael128GCM_encrypt(&cur_key, data_node->plain.data, NODE_SIZE, data_node->encrypted.cipher, 
+ 													empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &gcm_crypto_data->gmac);
++
++			        DBG_PRINT("after sgx_gcm_enc, status=%d\n", (int)status);
++
+ 				if (status != SGX_SUCCESS)
+ 				{
+ 					last_error = status;
+@@ -338,6 +338,7 @@ bool protected_fs_file::update_all_data_and_mht_nodes()
+ 				memcpy(gcm_crypto_data->key, cur_key, sizeof(sgx_aes_gcm_128bit_key_t)); // save the key used for this encryption
+ 
+ 				file_mht_node = data_node->parent;
++
+ 				// this loop should do nothing, add it here just to be safe
+ 				while (file_mht_node->mht_node_number != 0)
+ 				{
+@@ -383,6 +384,9 @@ bool protected_fs_file::update_all_data_and_mht_nodes()
+ 
+ 		status = sgx_rijndael128GCM_encrypt(&cur_key, (const uint8_t*)&file_mht_node->plain, NODE_SIZE, file_mht_node->encrypted.cipher, 
+ 											empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &gcm_crypto_data->gmac);
++
++                DBG_PRINT("after sgx_gcm_enc, status=%d\n", (int)status);
++
+ 		if (status != SGX_SUCCESS)
+ 		{
+ 			mht_list.clear();
+@@ -401,6 +405,9 @@ bool protected_fs_file::update_all_data_and_mht_nodes()
+ 
+ 	status = sgx_rijndael128GCM_encrypt(&cur_key, (const uint8_t*)&root_mht.plain, NODE_SIZE, root_mht.encrypted.cipher, 
+ 										empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &encrypted_part_plain.mht_gmac);
++
++        DBG_PRINT("after sgx_gcm_enc, status=%d\n", (int)status);
++
+ 	if (status != SGX_SUCCESS)
+ 	{
+ 		last_error = status;
+@@ -430,6 +437,9 @@ bool protected_fs_file::update_meta_data_node()
+ 										empty_iv, SGX_AESGCM_IV_SIZE, 
+ 										NULL, 0, 
+ 										&file_meta_data.plain_part.meta_data_gmac);
++
++        DBG_PRINT("after sgx_gcm_enc, status=%d\n", (int)status);
++
+ 	if (status != SGX_SUCCESS)
+ 	{
+ 		last_error = status;
+@@ -479,7 +489,7 @@ bool protected_fs_file::write_all_changes_to_disk(bool flush_to_disk)
+ 				node_number = file_mht_node->physical_node_number;
+ 			}
+ 
+-			status = u_sgxprotectedfs_fwrite_node(&result32, file, node_number, data_to_write, NODE_SIZE);
++			status = (sgx_status_t)u_sgxprotectedfs_fwrite_node_wrap(&result32, file, node_number, data_to_write, NODE_SIZE);
+ 			if (status != SGX_SUCCESS || result32 != 0)
+ 			{
+ 				last_error = (status != SGX_SUCCESS) ? status : 
+@@ -501,7 +511,7 @@ bool protected_fs_file::write_all_changes_to_disk(bool flush_to_disk)
+ 
+ 		}
+ 
+-		status = u_sgxprotectedfs_fwrite_node(&result32, file, 1, (uint8_t*)&root_mht.encrypted, NODE_SIZE);
++		status = (sgx_status_t)u_sgxprotectedfs_fwrite_node_wrap(&result32, file, 1, (uint8_t*)&root_mht.encrypted, NODE_SIZE);
+ 		if (status != SGX_SUCCESS || result32 != 0)
+ 		{
+ 			last_error = (status != SGX_SUCCESS) ? status : 
+@@ -512,7 +522,7 @@ bool protected_fs_file::write_all_changes_to_disk(bool flush_to_disk)
+ 		root_mht.new_node = false;
+ 	}
+ 
+-	status = u_sgxprotectedfs_fwrite_node(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
++	status = (sgx_status_t)u_sgxprotectedfs_fwrite_node_wrap(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+ 		last_error = (status != SGX_SUCCESS) ? status : 
+@@ -522,7 +532,7 @@ bool protected_fs_file::write_all_changes_to_disk(bool flush_to_disk)
+ 
+ 	if (flush_to_disk == true)
+ 	{
+-		status = u_sgxprotectedfs_fflush(&result, file);
++		status = (sgx_status_t)u_sgxprotectedfs_fflush_wrap(&result, file);
+ 		if (status != SGX_SUCCESS || result != 0)
+ 		{
+ 			last_error = status != SGX_SUCCESS ? status : SGX_ERROR_FILE_FLUSH_FAILED;
+@@ -542,7 +552,7 @@ void protected_fs_file::erase_recovery_file()
+ 	if (recovery_filename[0] == '\0') // not initialized yet
+ 		return;
+ 
+-	status = u_sgxprotectedfs_remove(&result32, recovery_filename);
++	status = (sgx_status_t)u_sgxprotectedfs_remove_wrap(&result32, recovery_filename);
+ 	(void)status; // don't care if it succeeded or failed...just remove the warning
+ }
+ 
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/file_init.cpp b/sdk/protected_fs/sgx_tprotected_fs/file_init.cpp
+index 9e9f473..49d0276 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/file_init.cpp
++++ b/sdk/protected_fs/sgx_tprotected_fs/file_init.cpp
+@@ -33,6 +33,11 @@
+ #include "sgx_tprotected_fs_t.h"
+ #include "protected_fs_file.h"
+ 
++#include "protfs_debug.h"
++
++#include "sgx_proxy_sdk_tlibc.h"
++
++#include "sgx_report.h"
+ #include <sgx_utils.h>
+ 
+ // remove the file path if it's there, leave only the filename, null terminated
+@@ -142,7 +147,7 @@ protected_fs_file::protected_fs_file(const char* filename, const char* mode, con
+ 		return;
+ 	}
+ 
+-	status = u_sgxprotectedfs_check_if_file_exists(&result, filename); // if result == 1 --> file exists
++	status = (sgx_status_t)u_sgxprotectedfs_check_if_file_exists_wrap(&result, filename); // if result == 1 --> file exists
+ 	if (status != SGX_SUCCESS)
+ 	{
+ 		last_error = status;
+@@ -162,7 +167,7 @@ protected_fs_file::protected_fs_file(const char* filename, const char* mode, con
+ 		}
+ 
+ 		// re-check
+-		status = u_sgxprotectedfs_check_if_file_exists(&result, filename);
++		status = (sgx_status_t)u_sgxprotectedfs_check_if_file_exists_wrap(&result, filename);
+ 		if (status != SGX_SUCCESS || result == 1)
+ 		{
+ 			last_error = (status != SGX_SUCCESS) ? status :
+@@ -187,7 +192,7 @@ protected_fs_file::protected_fs_file(const char* filename, const char* mode, con
+ 	read_only = (open_mode.read == 1 && open_mode.update == 0); // read only files can be opened simultaneously by many enclaves
+ 
+ 	do {
+-		status = u_sgxprotectedfs_exclusive_file_open(&file, filename, read_only, &real_file_size, &result32);
++		status = (sgx_status_t)u_sgxprotectedfs_exclusive_file_open_wrap(&file, filename, read_only, &real_file_size, &result32);
+ 		if (status != SGX_SUCCESS || file == NULL)
+ 		{
+ 			last_error = (status != SGX_SUCCESS) ? status :
+@@ -240,7 +245,7 @@ protected_fs_file::protected_fs_file(const char* filename, const char* mode, con
+ 	{
+ 		if (file != NULL)
+ 		{
+-			u_sgxprotectedfs_fclose(&result32, file); // we don't care about the result
++			u_sgxprotectedfs_fclose_wrap(&result32, file); // we don't care about the result
+ 			file = NULL;
+ 		}
+ 	}
+@@ -276,7 +281,8 @@ void protected_fs_file::init_fields()
+ 
+ 	recovery_filename[0] = '\0';
+ 	
+-	memset(&mutex, 0, sizeof(sgx_thread_mutex_t));
++	//memset(&mutex, 0, sizeof(sgx_thread_mutex_t));
++	memset(&mutex, 0, sizeof(pthread_mutex_t));
+ 
+ 	// set hash size to fit MAX_PAGES_IN_CACHE
+ 	cache.rehash(MAX_PAGES_IN_CACHE);
+@@ -340,7 +346,7 @@ bool protected_fs_file::file_recovery(const char* filename)
+ 	int32_t result32 = 0;
+ 	int64_t new_file_size = 0;
+ 
+-	status = u_sgxprotectedfs_fclose(&result32, file);
++	status = (sgx_status_t)u_sgxprotectedfs_fclose_wrap(&result32, file);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+ 		last_error = (status != SGX_SUCCESS) ? status : 
+@@ -350,7 +356,7 @@ bool protected_fs_file::file_recovery(const char* filename)
+ 
+ 	file = NULL;
+ 
+-	status = u_sgxprotectedfs_do_file_recovery(&result32, filename, recovery_filename, NODE_SIZE);
++	status = (sgx_status_t)u_sgxprotectedfs_do_file_recovery_wrap(&result32, filename, recovery_filename, NODE_SIZE);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+ 		last_error = (status != SGX_SUCCESS) ? status :
+@@ -358,7 +364,7 @@ bool protected_fs_file::file_recovery(const char* filename)
+ 		return false;
+ 	}
+ 
+-	status = u_sgxprotectedfs_exclusive_file_open(&file, filename, read_only, &new_file_size, &result32);
++	status = (sgx_status_t)u_sgxprotectedfs_exclusive_file_open_wrap(&file, filename, read_only, &new_file_size, &result32);
+ 	if (status != SGX_SUCCESS || file == NULL)
+ 	{
+ 		last_error = (status != SGX_SUCCESS) ? status : 
+@@ -373,7 +379,7 @@ bool protected_fs_file::file_recovery(const char* filename)
+ 		return false;
+ 	}
+ 
+-	status = u_sgxprotectedfs_fread_node(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
++	status = (sgx_status_t)u_sgxprotectedfs_fread_node_wrap(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+ 		last_error = (status != SGX_SUCCESS) ? status : 
+@@ -391,7 +397,7 @@ bool protected_fs_file::init_existing_file(const char* filename, const char* cle
+ 	int32_t result32;
+ 
+ 	// read meta-data node
+-	status = u_sgxprotectedfs_fread_node(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
++	status = (sgx_status_t)u_sgxprotectedfs_fread_node_wrap(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+ 		last_error = (status != SGX_SUCCESS) ? status : 
+@@ -448,6 +454,8 @@ bool protected_fs_file::init_existing_file(const char* filename, const char* cle
+ 										empty_iv, SGX_AESGCM_IV_SIZE,
+ 										NULL, 0,
+ 										&file_meta_data.plain_part.meta_data_gmac);
++        DBG_PRINT("after call to sgx_gcm_dec, status=%d\n", (int)status);
++
+ 	if (status != SGX_SUCCESS)
+ 	{
+ 		last_error = status;
+@@ -508,7 +516,7 @@ bool protected_fs_file::init_existing_file(const char* filename, const char* cle
+ 	if (encrypted_part_plain.size > MD_USER_DATA_SIZE)
+ 	{
+ 		// read the root node of the mht
+-		status = u_sgxprotectedfs_fread_node(&result32, file, 1, root_mht.encrypted.cipher, NODE_SIZE);
++		status = (sgx_status_t)u_sgxprotectedfs_fread_node_wrap(&result32, file, 1, root_mht.encrypted.cipher, NODE_SIZE);
+ 		if (status != SGX_SUCCESS || result32 != 0)
+ 		{
+ 			last_error = (status != SGX_SUCCESS) ? status : 
+@@ -520,6 +528,9 @@ bool protected_fs_file::init_existing_file(const char* filename, const char* cle
+ 		status = sgx_rijndael128GCM_decrypt(&encrypted_part_plain.mht_key, 
+ 											root_mht.encrypted.cipher, NODE_SIZE, (uint8_t*)&root_mht.plain, 
+ 											empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &encrypted_part_plain.mht_gmac);
++
++        	DBG_PRINT("after call to sgx_gcm_dec, status=%d\n", (int)status);
++
+ 		if (status != SGX_SUCCESS)
+ 		{
+ 			last_error = status;
+@@ -547,8 +558,7 @@ bool protected_fs_file::init_new_file(const char* clean_filename)
+ 
+ 	return true;
+ }
+-
+-
++	
+ protected_fs_file::~protected_fs_file()
+ {
+ 	void* data;
+@@ -613,7 +623,7 @@ bool protected_fs_file::pre_close(sgx_key_128bit_t* key, bool import)
+ 
+ 	if (file != NULL)
+ 	{
+-		status = u_sgxprotectedfs_fclose(&result32, file);
++		status = (sgx_status_t)u_sgxprotectedfs_fclose_wrap(&result32, file);
+ 		if (status != SGX_SUCCESS || result32 != 0)
+ 		{
+ 			last_error = (status != SGX_SUCCESS) ? status : 
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/file_other.cpp b/sdk/protected_fs/sgx_tprotected_fs/file_other.cpp
+index 567175c..7d06285 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/file_other.cpp
++++ b/sdk/protected_fs/sgx_tprotected_fs/file_other.cpp
+@@ -33,8 +33,8 @@
+ #include "sgx_tprotected_fs_t.h"
+ #include "protected_fs_file.h"
+ 
++#include "sgx_proxy_sdk_tlibc.h"
+ #include <sgx_utils.h>
+-//#include <sgx_trts.h>
+ 
+ #include <errno.h>
+ 
+@@ -142,7 +142,7 @@ int32_t protected_fs_file::remove(const char* filename)
+ */
+ 	
+ 	// do the actual file removal
+-	status = u_sgxprotectedfs_remove(&result32, filename);
++	status = (sgx_status_t)u_sgxprotectedfs_remove_wrap(&result32, filename);
+ 	if (status != SGX_SUCCESS) 
+ 	{
+ 		errno = status;
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/file_read_write.cpp b/sdk/protected_fs/sgx_tprotected_fs/file_read_write.cpp
+index 2b0070e..5198d62 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/file_read_write.cpp
++++ b/sdk/protected_fs/sgx_tprotected_fs/file_read_write.cpp
+@@ -32,7 +32,8 @@
+ #include "sgx_tprotected_fs_t.h"
+ #include "protected_fs_file.h"
+ 
+-#include <sgx_trts.h>
++#include "sgx_proxy_sdk_tlibc.h"
++//#include <sgx_trts.h>
+ 
+ size_t protected_fs_file::write(const void* ptr, size_t size, size_t count)
+ {
+@@ -65,14 +66,14 @@ size_t protected_fs_file::write(const void* ptr, size_t size, size_t count)
+ 		return 0;
+ 	}
+ #endif
+-
++/*
+ 	if (sgx_is_outside_enclave(ptr, data_left_to_write))
+ 	{
+ 		last_error = SGX_ERROR_INVALID_PARAMETER;
+ 		sgx_thread_mutex_unlock(&mutex);
+ 		return 0;
+ 	}
+-
++*/
+ 	if (file_status != SGX_FILE_STATUS_OK)
+ 	{
+ 		last_error = SGX_ERROR_FILE_BAD_STATUS;
+@@ -199,14 +200,14 @@ size_t protected_fs_file::read(void* ptr, size_t size, size_t count)
+ 	}
+ #endif
+ 
+-
++/*
+ 	if (sgx_is_outside_enclave(ptr, data_left_to_read))
+ 	{
+ 		last_error = EINVAL;
+ 		sgx_thread_mutex_unlock(&mutex);
+ 		return 0;
+ 	}
+-
++*/
+ 	if (file_status != SGX_FILE_STATUS_OK)
+ 	{
+ 		last_error = SGX_ERROR_FILE_BAD_STATUS;
+@@ -482,7 +483,7 @@ file_data_node_t* protected_fs_file::read_data_node()
+ 	file_data_node->physical_node_number = physical_node_number;
+ 	file_data_node->parent = file_mht_node;
+ 		
+-	status = u_sgxprotectedfs_fread_node(&result32, file, file_data_node->physical_node_number, file_data_node->encrypted.cipher, NODE_SIZE);
++	status = (sgx_status_t)u_sgxprotectedfs_fread_node_wrap(&result32, file, file_data_node->physical_node_number, file_data_node->encrypted.cipher, NODE_SIZE);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+ 		delete file_data_node;
+@@ -495,6 +496,9 @@ file_data_node_t* protected_fs_file::read_data_node()
+ 
+ 	// this function decrypt the data _and_ checks the integrity of the data against the gmac
+ 	status = sgx_rijndael128GCM_decrypt(&gcm_crypto_data->key, file_data_node->encrypted.cipher, NODE_SIZE, file_data_node->plain.data, empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &gcm_crypto_data->gmac);
++
++	DBG_PRINT("after sgx_gcm_dec, status=%d\n", (int)status);
++
+ 	if (status != SGX_SUCCESS)
+ 	{
+ 		delete file_data_node;
+@@ -620,7 +624,7 @@ file_mht_node_t* protected_fs_file::read_mht_node(uint64_t mht_node_number)
+ 	file_mht_node->physical_node_number = physical_node_number;
+ 	file_mht_node->parent = parent_file_mht_node;
+ 		
+-	status = u_sgxprotectedfs_fread_node(&result32, file, file_mht_node->physical_node_number, file_mht_node->encrypted.cipher, NODE_SIZE);
++	status = (sgx_status_t)u_sgxprotectedfs_fread_node_wrap(&result32, file, file_mht_node->physical_node_number, file_mht_node->encrypted.cipher, NODE_SIZE);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+ 		delete file_mht_node;
+@@ -633,6 +637,9 @@ file_mht_node_t* protected_fs_file::read_mht_node(uint64_t mht_node_number)
+ 
+ 	// this function decrypt the data _and_ checks the integrity of the data against the gmac
+ 	status = sgx_rijndael128GCM_decrypt(&gcm_crypto_data->key, file_mht_node->encrypted.cipher, NODE_SIZE, (uint8_t*)&file_mht_node->plain, empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &gcm_crypto_data->gmac);
++
++        DBG_PRINT("after sgx_gcm_dec, status=%d\n", (int)status);
++
+ 	if (status != SGX_SUCCESS)
+ 	{
+ 		delete file_mht_node;
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/protected_fs_file.h b/sdk/protected_fs/sgx_tprotected_fs/protected_fs_file.h
+index c03f7f2..8c99c9d 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/protected_fs_file.h
++++ b/sdk/protected_fs/sgx_tprotected_fs/protected_fs_file.h
+@@ -34,15 +34,19 @@
+ #ifndef _PROTECTED_FS_H_
+ #define _PROTECTED_FS_H_
+ 
++#include "string.h"
+ #include "protected_fs_nodes.h"
+ #include "lru_cache.h"
++#include "errno.h"
++
+ #include "sgx_error.h"
+ #include "sgx_tcrypto.h"
+-#include "errno.h"
++#include "sgx_proxy_thread.h"
+ 
+-#include <sgx_thread.h>
+ #include "sgx_tprotected_fs.h"
+ 
++#include "protfs_debug.h"
++
+ typedef enum
+ {
+ 	SGX_FILE_STATUS_OK = 0,
+@@ -59,9 +63,11 @@ typedef enum
+ 
+ #define MAX_PAGES_IN_CACHE 48
+ 
++#define FILENAME_MAX (260)
++
+ COMPILE_TIME_ASSERT(filename_length, FILENAME_MAX_LEN == FILENAME_MAX);
+ 
+-typedef void FILE;
++typedef void FILEPTR;
+ 
+ typedef union
+ {
+@@ -146,7 +152,7 @@ private:
+ 	
+ 	file_mht_node_t root_mht; // the root of the mht is always needed (for files bigger than 3KB)
+ 
+-	FILE* file; // OS's FILE pointer
++	FILEPTR* file; // OS's FILE pointer
+ 	
+ 	open_mode_t open_mode;
+ 	uint8_t read_only;
+@@ -159,7 +165,8 @@ private:
+ 	uint32_t last_error; // last operation error
+ 	protected_fs_status_e file_status;
+ 	
+-	sgx_thread_mutex_t mutex;
++	//sgx_thread_mutex_t mutex;
++	pthread_mutex_t mutex;
+ 
+ 	uint8_t use_user_kdk_key;
+ 	sgx_aes_gcm_128bit_key_t user_kdk_key; // recieved from user, used instead of the seal key
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/protected_fs_nodes.h b/sdk/protected_fs/sgx_tprotected_fs/protected_fs_nodes.h
+index cdc0044..374e33c 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/protected_fs_nodes.h
++++ b/sdk/protected_fs/sgx_tprotected_fs/protected_fs_nodes.h
+@@ -40,6 +40,7 @@
+ #include <sgx_tcrypto.h>
+ #include <sgx_tae_service.h>
+ 
++
+ #pragma pack(push, 1)
+ 
+ #define NODE_SIZE 4096
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs.cpp b/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs.cpp
+index 4fe245c..ce7b9b3 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs.cpp
++++ b/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs.cpp
+@@ -248,7 +248,4 @@ int32_t sgx_fclear_cache(SGX_FILE* stream)
+ 	protected_fs_file* file = (protected_fs_file*)stream;
+ 
+ 	return file->clear_cache();
+-}
+-
+-
+-
++}
+\ No newline at end of file
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs_t.cpp b/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs_t.cpp
+new file mode 100644
+index 0000000..f8a6a06
+--- /dev/null
++++ b/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs_t.cpp
+@@ -0,0 +1,124 @@
++/*
++ * License: BSD 3-Clause "New" or "Revised" License
++ *
++ * Other web pages for this license
++ * http://www.opensource.org/licenses/BSD-3-Clause
++ *
++ * Copyright (C) 2018 Intel Corporation. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *
++ *   * Redistributions of source code must retain the above copyright
++ *     notice, this list of conditions and the following disclaimer.
++ *   * Redistributions in binary form must reproduce the above copyright
++ *     notice, this list of conditions and the following disclaimer in
++ *     the documentation and/or other materials provided with the
++ *     distribution.
++ *   * Neither the name of Intel Corporation nor the names of its
++ *     contributors may be used to endorse or promote products derived
++ *     from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ *
++ */
++
++#include "sgx_tprotected_fs_t.h"
++#include "sgx_tprotected_fs_u.h"
++
++
++sgx_status_t u_sgxprotectedfs_exclusive_file_open_wrap(void** retval, const char* filename, uint8_t read_only, int64_t* file_size, int32_t* error_code)
++{
++
++	*retval = u_sgxprotectedfs_exclusive_file_open(filename, read_only, file_size, error_code);
++	
++	return SGX_SUCCESS;
++
++}
++
++sgx_status_t u_sgxprotectedfs_check_if_file_exists_wrap(uint8_t* retval, const char* filename)
++{
++
++	*retval = u_sgxprotectedfs_check_if_file_exists(filename);
++
++	return SGX_SUCCESS;
++}
++
++sgx_status_t /*SGX_CDECL*/ u_sgxprotectedfs_fread_node_wrap(int32_t* retval, void* f, uint64_t node_number, uint8_t* buffer, uint32_t node_size)
++{
++
++	*retval = u_sgxprotectedfs_fread_node(f, node_number, buffer, node_size);
++	
++	return SGX_SUCCESS;
++}
++
++sgx_status_t /*SGX_CDECL*/ u_sgxprotectedfs_fwrite_node_wrap(int32_t* retval, void* f, uint64_t node_number, uint8_t* buffer, uint32_t node_size)
++{
++
++	*retval = u_sgxprotectedfs_fwrite_node(f, node_number, buffer, node_size);
++
++	return SGX_SUCCESS;
++
++}
++
++sgx_status_t /*SGX_CDECL*/ u_sgxprotectedfs_fclose_wrap(int32_t* retval, void* f)
++{
++	*retval = u_sgxprotectedfs_fclose(f);
++
++	return SGX_SUCCESS;
++
++}
++
++sgx_status_t /*SGX_CDECL*/ u_sgxprotectedfs_fflush_wrap(uint8_t* retval, void* f)
++{
++
++	*retval = u_sgxprotectedfs_fflush(f);
++
++	return SGX_SUCCESS;
++
++}
++
++sgx_status_t /*SGX_CDECL*/ u_sgxprotectedfs_remove_wrap(int32_t* retval, const char* filename)
++{
++	*retval = u_sgxprotectedfs_remove(filename);
++
++	return SGX_SUCCESS;
++
++}
++
++sgx_status_t /*SGX_CDECL*/ u_sgxprotectedfs_recovery_file_open_wrap(void** retval, const char* filename)
++{
++
++	*retval = u_sgxprotectedfs_recovery_file_open(filename);
++
++	return SGX_SUCCESS;
++}
++
++sgx_status_t /*SGX_CDECL*/ u_sgxprotectedfs_fwrite_recovery_node_wrap(uint8_t* retval, void* f, uint8_t* data, uint32_t data_length)
++{
++	*retval = u_sgxprotectedfs_fwrite_recovery_node(f, data, data_length);
++
++	return SGX_SUCCESS;
++
++}
++
++
++sgx_status_t /*SGX_CDECL*/ u_sgxprotectedfs_do_file_recovery_wrap(int32_t* retval, const char* filename, const char* recovery_filename, uint32_t node_size)
++{
++	
++	*retval = u_sgxprotectedfs_do_file_recovery(filename, recovery_filename, node_size);
++
++	return SGX_SUCCESS;
++
++}
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs_t.h b/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs_t.h
+new file mode 100644
+index 0000000..c9a44ba
+--- /dev/null
++++ b/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs_t.h
+@@ -0,0 +1,35 @@
++#ifndef SGX_TPROTECTED_FS_T_H__
++#define SGX_TPROTECTED_FS_T_H__
++
++#include <stdint.h>
++#include <wchar.h>
++#include <stddef.h>
++//#include "sgx_edger8r.h" /* for sgx_ocall etc. */
++
++
++#include <stdlib.h> /* for size_t */
++//#include "sgx_proxy_error.h"
++#include "sgx_error.h"
++
++#define SGX_CAST(type, item) ((type)(item))
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++sgx_status_t u_sgxprotectedfs_exclusive_file_open_wrap(void** retval, const char* filename, uint8_t read_only, int64_t* file_size, int32_t* error_code);
++sgx_status_t  u_sgxprotectedfs_check_if_file_exists_wrap(uint8_t* retval, const char* filename);
++sgx_status_t  u_sgxprotectedfs_fread_node_wrap(int32_t* retval, void* f, uint64_t node_number, uint8_t* buffer, uint32_t node_size);
++sgx_status_t  u_sgxprotectedfs_fwrite_node_wrap(int32_t* retval, void* f, uint64_t node_number, uint8_t* buffer, uint32_t node_size);
++sgx_status_t  u_sgxprotectedfs_fclose_wrap(int32_t* retval, void* f);
++sgx_status_t  u_sgxprotectedfs_fflush_wrap(uint8_t* retval, void* f);
++sgx_status_t  u_sgxprotectedfs_remove_wrap(int32_t* retval, const char* filename);
++sgx_status_t  u_sgxprotectedfs_recovery_file_open_wrap(void** retval, const char* filename);
++sgx_status_t  u_sgxprotectedfs_fwrite_recovery_node_wrap(uint8_t* retval, void* f, uint8_t* data, uint32_t data_length);
++sgx_status_t  u_sgxprotectedfs_do_file_recovery_wrap(int32_t* retval, const char* filename, const char* recovery_filename, uint32_t node_size);
++
++#ifdef __cplusplus
++}
++#endif /* __cplusplus */
++
++#endif
+diff --git a/sdk/protected_fs/sgx_uprotected_fs/sgx_tprotected_fs_u.h b/sdk/protected_fs/sgx_uprotected_fs/sgx_tprotected_fs_u.h
+new file mode 100644
+index 0000000..60353a6
+--- /dev/null
++++ b/sdk/protected_fs/sgx_uprotected_fs/sgx_tprotected_fs_u.h
+@@ -0,0 +1,34 @@
++#ifndef SGX_TPROTECTED_FS_U_H__
++#define SGX_TPROTECTED_FS_U_H__
++
++#include <stdint.h>
++#include <wchar.h>
++#include <stddef.h>
++#include <string.h>
++//#include "sgx_edger8r.h" /* for sgx_satus_t etc. */
++
++
++#include <stdlib.h> /* for size_t */
++
++//#define SGX_CAST(type, item) ((type)(item))
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++void * u_sgxprotectedfs_exclusive_file_open(const char* filename, uint8_t read_only, int64_t* file_size, int32_t* error_code);
++uint8_t u_sgxprotectedfs_check_if_file_exists(const char* filename);
++int32_t u_sgxprotectedfs_fread_node(void* f, uint64_t node_number, uint8_t* buffer, uint32_t node_size);
++int32_t u_sgxprotectedfs_fwrite_node(void* f, uint64_t node_number, uint8_t* buffer, uint32_t node_size);
++int32_t u_sgxprotectedfs_fclose(void* f);
++uint8_t u_sgxprotectedfs_fflush(void* f);
++int32_t u_sgxprotectedfs_remove(const char* filename);
++void* u_sgxprotectedfs_recovery_file_open(const char* filename);
++uint8_t u_sgxprotectedfs_fwrite_recovery_node(void* f, uint8_t* data, uint32_t data_length);
++int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* recovery_filename, uint32_t node_size);
++
++#ifdef __cplusplus
++}
++#endif /* __cplusplus */
++
++#endif
+diff --git a/sdk/protected_fs/sgx_uprotected_fs/sgx_uprotected_fs.cpp b/sdk/protected_fs/sgx_uprotected_fs/sgx_uprotected_fs.cpp
+index 2226ced..2124e1c 100644
+--- a/sdk/protected_fs/sgx_uprotected_fs/sgx_uprotected_fs.cpp
++++ b/sdk/protected_fs/sgx_uprotected_fs/sgx_uprotected_fs.cpp
+@@ -41,16 +41,18 @@
+ #include <fcntl.h>
+ 
+ #include "sgx_tprotected_fs_u.h"
+-#include <uprotected_fs.h>
+ 
++#include <dlfcn.h>
++#include "fileops_typedefs.h"
++
++//#define DEBUG
+ 
+ #ifdef DEBUG
+-#define DEBUG_PRINT(fmt, args...) fprintf(stderr, "[sgx_uprotected_fs.h:%d] " fmt, __LINE__, ##args)
++#define DEBUG_PRINT(fmt, args...) printf("\n[sgx_uprotected_fs.cpp:%d] " fmt, __LINE__, ##args)
+ #else
+ #define DEBUG_PRINT(...)
+ #endif
+ 
+-
+ void* u_sgxprotectedfs_exclusive_file_open(const char* filename, uint8_t read_only, int64_t* file_size, int32_t* error_code)
+ {
+ 	FILE* f = NULL;
+@@ -69,16 +71,19 @@ void* u_sgxprotectedfs_exclusive_file_open(const char* filename, uint8_t read_on
+ 	}
+ 
+ 	// open the file with OS API so we can 'lock' the file and get exclusive access to it
+-	fd = open(filename,	O_CREAT | (read_only ? O_RDONLY : O_RDWR) | O_LARGEFILE, mode); // create the file if it doesn't exists, read-only/read-write
++	fd = open_fn_glb(filename,	O_CREAT | (read_only ? O_RDONLY : O_RDWR) | O_LARGEFILE, mode); // create the file if it doesn't exists, read-only/read-write
+ 	if (fd == -1)
+ 	{
+ 		DEBUG_PRINT("open returned %d, errno %d\n", result, errno);
++		DEBUG_PRINT("filename->%s, passed to open\n", filename);
+ 		*error_code = errno;
+ 		return NULL;
+ 	}
+ 
+ 	// this lock is advisory only and programs with high priviliges can ignore it
+ 	// it is set to help the user avoid mistakes, but it won't prevent intensional DOS attack from priviliged user
++	/*Note: graphene's glibc api, does not support flock(returns ENOSYS).*/
++    /* 
+ 	result = flock(fd, (read_only ? LOCK_SH : LOCK_EX) | LOCK_NB); // NB - non blocking
+ 	if (result != 0)
+ 	{
+@@ -88,13 +93,14 @@ void* u_sgxprotectedfs_exclusive_file_open(const char* filename, uint8_t read_on
+ 		assert(result == 0);
+ 		return NULL;
+ 	}
++    */
+ 
+ 	result = fstat(fd, &stat_st);
+ 	if (result != 0)
+ 	{
+ 		DEBUG_PRINT("fstat returned %d, errno %d\n", result, errno);
+ 		*error_code = errno;
+-		flock(fd, LOCK_UN);
++		//flock(fd, LOCK_UN);
+ 		result = close(fd);
+ 		assert(result == 0);
+ 		return NULL;
+@@ -106,7 +112,7 @@ void* u_sgxprotectedfs_exclusive_file_open(const char* filename, uint8_t read_on
+ 	{
+ 		DEBUG_PRINT("fdopen returned NULL\n");
+ 		*error_code = errno;
+-		flock(fd, LOCK_UN);
++		//flock(fd, LOCK_UN);
+ 		result = close(fd);
+ 		assert(result == 0);
+ 		return NULL;
+@@ -131,6 +137,8 @@ uint8_t u_sgxprotectedfs_check_if_file_exists(const char* filename)
+ 		return 1;
+ 	}
+ 	
++	DEBUG_PRINT("filename=%s\n", filename);
++
+ 	return (stat(filename, &stat_st) == 0); 
+ }
+ 
+@@ -148,7 +156,7 @@ int32_t u_sgxprotectedfs_fread_node(void* f, uint64_t node_number, uint8_t* buff
+ 		return -1;
+ 	}
+ 
+-	if ((result = fseeko(file, offset, SEEK_SET)) != 0)
++	if ((result = fseeko_fn_glb(file, offset, SEEK_SET)) != 0)
+ 	{
+ 		DEBUG_PRINT("fseeko returned %d\n", result);
+ 		if (errno != 0)
+@@ -160,9 +168,9 @@ int32_t u_sgxprotectedfs_fread_node(void* f, uint64_t node_number, uint8_t* buff
+ 			return -1;
+ 	}
+ 
+-	if ((size = fread(buffer, node_size, 1, file)) != 1)
++	if ((size = fread_fn_glb(buffer, node_size, 1, file)) != 1)
+ 	{
+-		int err = ferror(file);
++		int err = ferror_fn_glb(file);
+ 		if (err != 0)
+ 		{
+ 			DEBUG_PRINT("fread returned %ld [!= 1], ferror: %d\n", size, err);
+@@ -198,7 +206,7 @@ int32_t u_sgxprotectedfs_fwrite_node(void* f, uint64_t node_number, uint8_t* buf
+ 		return -1;
+ 	}
+ 
+-	if ((result = fseeko(file, offset, SEEK_SET)) != 0)
++	if ((result = fseeko_fn_glb(file, offset, SEEK_SET)) != 0)
+ 	{
+ 		DEBUG_PRINT("fseeko returned %d\n", result);
+ 		if (errno != 0)
+@@ -210,10 +218,10 @@ int32_t u_sgxprotectedfs_fwrite_node(void* f, uint64_t node_number, uint8_t* buf
+ 			return -1;
+ 	}
+ 
+-	if ((size = fwrite(buffer, node_size, 1, file)) != 1)
++	if ((size = fwrite_fn_glb(buffer, node_size, 1, file)) != 1)
+ 	{
+ 		DEBUG_PRINT("fwrite returned %ld [!= 1]\n", size);
+-		int err = ferror(file);
++		int err = ferror_fn_glb(file);
+ 		if (err != 0)
+ 			return err;
+ 		else if (errno != 0)
+@@ -242,13 +250,13 @@ int32_t u_sgxprotectedfs_fclose(void* f)
+ 	}
+ 
+ 	// closing the file handle should also remove the lock, but we try to remove it explicitly
+-	fd = fileno(file);
++	fd = fileno_fn_glb(file);
+ 	if (fd == -1)
+ 		DEBUG_PRINT("fileno returned -1\n");
+-	else
+-		flock(fd, LOCK_UN);
++	/*else
++		flock(fd, LOCK_UN);*/
+ 	
+-	if ((result = fclose(file)) != 0)
++	if ((result = fclose_fn_glb(file)) != 0)
+ 	{
+ 		if (errno != 0)
+ 		{
+@@ -256,7 +264,7 @@ int32_t u_sgxprotectedfs_fclose(void* f)
+ 			DEBUG_PRINT("fclose returned %d, errno: %d\n", result, err);
+ 			return err;
+ 		}
+-		DEBUG_PRINT("fclose returned %d\n", result);
++		DEBUG_PRINT("fclose_fn_glb returned %d\n", result);
+ 		return -1;
+ 	}
+ 
+@@ -275,7 +283,7 @@ uint8_t u_sgxprotectedfs_fflush(void* f)
+ 		return 1;
+ 	}
+ 	
+-	if ((result = fflush(file)) != 0)
++	if ((result = fflush_fn_glb(file)) != 0)
+ 	{
+ 		DEBUG_PRINT("fflush returned %d\n", result);
+ 		return 1;
+@@ -295,7 +303,7 @@ int32_t u_sgxprotectedfs_remove(const char* filename)
+ 		return -1;
+ 	}
+ 
+-	if ((result = remove(filename)) != 0)
++	if ((result = remove_fn_glb(filename)) != 0)
+ 	{// this function is called from the destructor which is called when calling fclose, if there were no writes, there is no recovery file...we don't want endless prints...
+ 		//DEBUG_PRINT("remove returned %d\n", result);
+ 		if (errno != 0)
+@@ -320,7 +328,7 @@ void* u_sgxprotectedfs_recovery_file_open(const char* filename)
+ 	
+ 	for (int i = 0; i < MAX_FOPEN_RETRIES; i++)
+ 	{
+-		f = fopen(filename, "wb");
++		f = fopen_fn_glb(filename, "wb");
+ 		if (f != NULL)
+ 			break;
+ 		usleep(MILISECONDS_SLEEP_FOPEN);
+@@ -346,7 +354,7 @@ uint8_t u_sgxprotectedfs_fwrite_recovery_node(void* f, uint8_t* data, uint32_t d
+ 	}
+ 		
+ 	// recovery nodes are written sequentially
+-	size_t count = fwrite(data, 1, data_length, file);
++	size_t count = fwrite_fn_glb(data, 1, data_length, file);
+ 	if (count != data_length)
+ 	{
+ 		DEBUG_PRINT("fwrite returned %ld instead of %d\n", count, data_length);
+@@ -385,7 +393,7 @@ int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* reco
+ 			return (int32_t)NULL;
+ 		}
+ 	
+-		recovery_file = fopen(recovery_filename, "rb");
++		recovery_file = fopen_fn_glb(recovery_filename, "rb");
+ 		if (recovery_file == NULL)
+ 		{
+ 			DEBUG_PRINT("fopen of recovery file returned NULL - no recovery file exists\n");
+@@ -393,7 +401,7 @@ int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* reco
+ 			break;
+ 		}
+ 
+-		if ((result = fseeko(recovery_file, 0, SEEK_END)) != 0)
++		if ((result = fseeko_fn_glb(recovery_file, 0, SEEK_END)) != 0)
+ 		{
+ 			DEBUG_PRINT("fseeko returned %d\n", result);
+ 			if (errno != 0)
+@@ -401,9 +409,9 @@ int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* reco
+ 			break;
+ 		}
+ 
+-		file_size = ftello(recovery_file);
++		file_size = ftello_fn_glb(recovery_file);
+ 	
+-		if ((result = fseeko(recovery_file, 0, SEEK_SET)) != 0)
++		if ((result = fseeko_fn_glb(recovery_file, 0, SEEK_SET)) != 0)
+ 		{
+ 			DEBUG_PRINT("fseeko returned %d\n", result);
+ 			if (errno != 0)
+@@ -429,7 +437,7 @@ int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* reco
+ 			break;
+ 		}
+ 
+-		source_file = fopen(filename, "r+b");
++		source_file = fopen_fn_glb(filename, "r+b");
+ 		if (source_file == NULL)
+ 		{
+ 			DEBUG_PRINT("fopen returned NULL\n");
+@@ -439,10 +447,10 @@ int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* reco
+ 
+ 		for (i = 0 ; i < nodes_count ; i++)
+ 		{
+-			if ((count = fread(recovery_node, recovery_node_size, 1, recovery_file)) != 1)
++			if ((count = fread_fn_glb(recovery_node, recovery_node_size, 1, recovery_file)) != 1)
+ 			{
+ 				DEBUG_PRINT("fread returned %ld [!= 1]\n", count);
+-				err = ferror(recovery_file);
++				err = ferror_fn_glb(recovery_file);
+ 				if (err != 0)
+ 					ret = err;
+ 				else if (errno != 0) 
+@@ -451,7 +459,7 @@ int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* reco
+ 			}
+ 
+ 			// seek the regular file to the required offset
+-			if ((result = fseeko(source_file, (*((uint64_t*)recovery_node)) * node_size, SEEK_SET)) != 0)
++			if ((result = fseeko_fn_glb(source_file, (*((uint64_t*)recovery_node)) * node_size, SEEK_SET)) != 0)
+ 			{
+ 				DEBUG_PRINT("fseeko returned %d\n", result);
+ 				if (errno != 0)
+@@ -460,10 +468,10 @@ int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* reco
+ 			}
+ 
+ 			// write down the original data from the recovery file
+-			if ((count = fwrite(&recovery_node[sizeof(uint64_t)], node_size, 1, source_file)) != 1)
++			if ((count = fwrite_fn_glb(&recovery_node[sizeof(uint64_t)], node_size, 1, source_file)) != 1)
+ 			{
+ 				DEBUG_PRINT("fwrite returned %ld [!= 1]\n", count);
+-				err = ferror(source_file);
++				err = ferror_fn_glb(source_file);
+ 				if (err != 0)
+ 					ret = err;
+ 				else if (errno != 0) 
+@@ -475,7 +483,7 @@ int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* reco
+ 		if (i != nodes_count) // the 'for' loop exited with error
+ 			break;
+ 
+-		if ((result = fflush(source_file)) != 0)
++		if ((result = fflush_fn_glb(source_file)) != 0)
+ 		{
+ 			DEBUG_PRINT("fflush returned %d\n", result);
+ 			ret = result;
+@@ -491,18 +499,18 @@ int32_t u_sgxprotectedfs_do_file_recovery(const char* filename, const char* reco
+ 
+ 	if (source_file != NULL)
+ 	{
+-		result = fclose(source_file);
++		result = fclose_fn_glb(source_file);
+ 		assert(result == 0);
+ 	}
+ 
+ 	if (recovery_file != NULL)
+ 	{
+-		result = fclose(recovery_file);
++		result = fclose_fn_glb(recovery_file);
+ 		assert(result == 0);
+ 	}
+ 
+ 	if (ret == 0)
+-		remove(recovery_filename);
++		remove_fn_glb(recovery_filename);
+ 	
+ 	return ret;
+ }
+-- 
+2.24.0
+
+
+From 9222a168b338f0e10dcb9875cf803b6fd67bb3e9 Mon Sep 17 00:00:00 2001
+From: "Krishnakumar, Sudha" <sudha.krishnakumar@intel.com>
+Date: Tue, 21 Jan 2020 12:13:01 -0800
+Subject: [PATCH 2/2] Changes to make PFS SDK library C-based, and removed C++
+ Dependencies. In order to build this, will need following 2 dependencies: -
+ Hashmap Lib: Using the hashmap library(MIT License, same as mbedtls used by
+ Graphene): You can pull the sources from here->
+ https://github.com/DavidLeeds/hashmap - Also needs list.h in Graphene-PAL, to
+ have few additional features like sorting, and extra field like size. Please
+ refer to changes in just 1 file->list.h.
+ https://github.com/oscarlab/graphene/pull/1268
+
+---
+ .../sgx_tprotected_fs/file_crypto.cpp         | 124 ++--
+ .../sgx_tprotected_fs/file_flush.cpp          | 361 ++++++++----
+ .../sgx_tprotected_fs/file_init.cpp           | 509 +++++++++-------
+ .../sgx_tprotected_fs/file_other.cpp          | 153 ++---
+ .../sgx_tprotected_fs/file_read_write.cpp     | 364 +++++++-----
+ .../sgx_tprotected_fs/lru_cache.cpp           | 551 +++++++++++-------
+ .../sgx_tprotected_fs/lru_cache.h             | 130 ++---
+ .../sgx_tprotected_fs/protected_fs_file.h     | 165 +++---
+ .../sgx_tprotected_fs/sgx_tprotected_fs.cpp   |  79 ++-
+ 9 files changed, 1402 insertions(+), 1034 deletions(-)
+
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/file_crypto.cpp b/sdk/protected_fs/sgx_tprotected_fs/file_crypto.cpp
+index 7030028..210ba82 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/file_crypto.cpp
++++ b/sdk/protected_fs/sgx_tprotected_fs/file_crypto.cpp
+@@ -36,7 +36,7 @@
+ #include "sgx_attributes.h"
+ #include "sgx_utils.h"
+ 
+-#include "protfs_debug.h"
++#include "pfs_debug.h"
+ 
+ //Note: sgx_trts.h has sgx_read_rand defn.
+ #include "sgx_proxy_rand.h"
+@@ -61,33 +61,39 @@ typedef struct {
+ 
+ #define MAX_MASTER_KEY_USAGES 65536
+ 
+-bool protected_fs_file::generate_secure_blob(sgx_aes_gcm_128bit_key_t* key, const char* label, uint64_t physical_node_number, sgx_aes_gcm_128bit_tag_t* output)
++static bool generate_secure_blob(protected_fs_file_t *pfs_file, sgx_aes_gcm_128bit_key_t* key, const char* label, uint64_t physical_node_number, sgx_aes_gcm_128bit_tag_t* output);
++static bool generate_secure_blob_from_user_kdk(protected_fs_file_t *pfs_file, bool restore);
++
++static bool generate_secure_blob(protected_fs_file_t *pfs_file, sgx_aes_gcm_128bit_key_t* key, const char* label, uint64_t physical_node_number, sgx_aes_gcm_128bit_tag_t* output)
+ {
+ 
+ 	kdf_input_t buf = {0, "", 0, "", 0};
+ 	sgx_status_t status;
+ 
++	if (!pfs_file)
++	    return false;
++
+ 	uint32_t len = (uint32_t)strnlen(label, MAX_LABEL_LEN + 1);
+ 	if (len > MAX_LABEL_LEN)
+ 	{
+-		last_error = EINVAL;
++		pfs_file->last_error = EINVAL;
+ 		return false;
+ 	}
+ 
+ 	// index
+ 	// SP800-108:
+-	// i – A counter, a binary string of length r that is an input to each iteration of a PRF in counter mode [...].
++	// i ï¿½ A counter, a binary string of length r that is an input to each iteration of a PRF in counter mode [...].
+ 	buf.index = 0x01;
+ 
+ 	// label
+ 	// SP800-108:
+-	// Label – A string that identifies the purpose for the derived keying material, which is encoded as a binary string. 
++	// Label ï¿½ A string that identifies the purpose for the derived keying material, which is encoded as a binary string. 
+ 	//         The encoding method for the Label is defined in a larger context, for example, in the protocol that uses a KDF.
+ 	strncpy(buf.label, label, len);
+ 
+ 	// context and nonce
+ 	// SP800-108: 
+-	// Context – A binary string containing the information related to the derived keying material.
++	// Context ï¿½ A binary string containing the information related to the derived keying material.
+ 	//           It may include identities of parties who are deriving and / or using the derived keying material and, 
+ 	//           optionally, a nonce known by the parties who derive the keys.
+ 	buf.node_number = physical_node_number;
+@@ -95,7 +101,7 @@ bool protected_fs_file::generate_secure_blob(sgx_aes_gcm_128bit_key_t* key, cons
+ 	status = sgx_read_rand((unsigned char*)&(buf.nonce16), sizeof(sgx_cmac_128bit_tag_t));
+ 	if (status != SGX_SUCCESS)
+ 	{
+-		last_error = status;
++	    pfs_file->last_error = status;
+ 		return false;
+ 	}
+ 
+@@ -104,11 +110,11 @@ bool protected_fs_file::generate_secure_blob(sgx_aes_gcm_128bit_key_t* key, cons
+ 
+ 	status = sgx_rijndael128_cmac_msg(key, (const uint8_t*)&buf, sizeof(kdf_input_t), output);
+ 
+-        DBG_PRINT("\nafter sgx_cmac_msg, status=%d\n", (int)status);
++	DBG_PRINT("\nafter sgx_cmac_msg, status=%d\n", (int)status);
+ 
+ 	if (status != SGX_SUCCESS)
+ 	{
+-		last_error = status;
++	    pfs_file->last_error = status;
+ 		return false;
+ 	}
+ 
+@@ -118,25 +124,28 @@ bool protected_fs_file::generate_secure_blob(sgx_aes_gcm_128bit_key_t* key, cons
+ }
+ 
+ 
+-bool protected_fs_file::generate_secure_blob_from_user_kdk(bool restore)
++static bool generate_secure_blob_from_user_kdk(protected_fs_file_t *pfs_file, bool restore)
+ {
++    if (!pfs_file)
++        return false;
++
+ 	kdf_input_t buf = {0, "", 0, "", 0};
+ 	sgx_status_t status = SGX_SUCCESS;
+ 
+ 	// index
+ 	// SP800-108:
+-	// i – A counter, a binary string of length r that is an input to each iteration of a PRF in counter mode [...].
++	// i ï¿½ A counter, a binary string of length r that is an input to each iteration of a PRF in counter mode [...].
+ 	buf.index = 0x01;
+ 
+ 	// label
+ 	// SP800-108:
+-	// Label – A string that identifies the purpose for the derived keying material, which is encoded as a binary string. 
++	// Label ï¿½ A string that identifies the purpose for the derived keying material, which is encoded as a binary string. 
+ 	//         The encoding method for the Label is defined in a larger context, for example, in the protocol that uses a KDF.
+ 	strncpy(buf.label, METADATA_KEY_NAME, strlen(METADATA_KEY_NAME));
+ 
+ 	// context and nonce
+ 	// SP800-108: 
+-	// Context – A binary string containing the information related to the derived keying material.
++	// Context ï¿½ A binary string containing the information related to the derived keying material.
+ 	//           It may include identities of parties who are deriving and / or using the derived keying material and, 
+ 	//           optionally, a nonce known by the parties who derive the keys.
+ 	buf.node_number = 0;
+@@ -147,32 +156,31 @@ bool protected_fs_file::generate_secure_blob_from_user_kdk(bool restore)
+ 		status = sgx_read_rand((unsigned char*)&(buf.nonce32), sizeof(sgx_key_id_t));
+ 		if (status != SGX_SUCCESS)
+ 		{
+-			last_error = status;
++			pfs_file->last_error = status;
+ 			return false;
+ 		}
+ 	}
+ 	else
+ 	{
+-		memcpy(&buf.nonce32, &file_meta_data.plain_part.meta_data_key_id, sizeof(sgx_key_id_t));
++		memcpy(&buf.nonce32, &pfs_file->file_meta_data.plain_part.meta_data_key_id, sizeof(sgx_key_id_t));
+ 	}
+ 	
+ 
+ 	// length of output (128 bits)
+ 	buf.output_len = 0x80;
+ 
+-	status = sgx_rijndael128_cmac_msg(&user_kdk_key, (const uint8_t*)&buf, sizeof(kdf_input_t), &cur_key);
+-
+-        DBG_PRINT("\nafter sgx_cmac_msg, status=%d\n", (int)status);
++	status = sgx_rijndael128_cmac_msg(&pfs_file->user_kdk_key, (const uint8_t*)&buf, sizeof(kdf_input_t), &pfs_file->cur_key);
++    DBG_PRINT("\nafter sgx_cmac_msg, status=%d\n", (int)status);
+ 
+ 	if (status != SGX_SUCCESS)
+ 	{
+-		last_error = status;
++	    pfs_file->last_error = status;
+ 		return false;
+ 	}
+ 
+ 	if (restore == false)
+ 	{
+-		memcpy(&file_meta_data.plain_part.meta_data_key_id, &buf.nonce32, sizeof(sgx_key_id_t));
++		memcpy(&pfs_file->file_meta_data.plain_part.meta_data_key_id, &buf.nonce32, sizeof(sgx_key_id_t));
+ 	}
+ 
+ 	memset_s(&buf, sizeof(kdf_input_t), 0, sizeof(kdf_input_t));
+@@ -181,39 +189,48 @@ bool protected_fs_file::generate_secure_blob_from_user_kdk(bool restore)
+ }
+ 
+ 
+-bool protected_fs_file::init_session_master_key()
++bool init_session_master_key(protected_fs_file_t *pfs_file)
+ {
++    if (!pfs_file)
++        return false;
++
+ 	sgx_aes_gcm_128bit_key_t empty_key = {0};
+ 		
+-	if (generate_secure_blob(&empty_key, MASTER_KEY_NAME, 0, (sgx_aes_gcm_128bit_tag_t*)&session_master_key) == false)
++	if (generate_secure_blob(pfs_file, &empty_key, MASTER_KEY_NAME, 0, (sgx_aes_gcm_128bit_tag_t*)&pfs_file->session_master_key) == false)
+ 		return false;
+ 
+-	master_key_count = 0;
++	pfs_file->master_key_count = 0;
+ 
+ 	return true;
+ }
+ 
+ 
+-bool protected_fs_file::derive_random_node_key(uint64_t physical_node_number)
++bool derive_random_node_key(protected_fs_file_t *pfs_file, uint64_t physical_node_number)
+ {
+-	if (master_key_count++ > MAX_MASTER_KEY_USAGES)
++    if (!pfs_file)
++        return false;
++
++	if (pfs_file->master_key_count++ > MAX_MASTER_KEY_USAGES)
+ 	{
+-		if (init_session_master_key() == false)
++		if (init_session_master_key(pfs_file) == false)
+ 			return false;
+ 	}
+ 
+-	if (generate_secure_blob(&session_master_key, RANDOM_KEY_NAME, physical_node_number, (sgx_aes_gcm_128bit_tag_t*)&cur_key) == false)
++	if (generate_secure_blob(pfs_file, &pfs_file->session_master_key, RANDOM_KEY_NAME, physical_node_number, (sgx_aes_gcm_128bit_tag_t*)&pfs_file->cur_key) == false)
+ 		return false;
+ 
+ 	return true;
+ }
+ 
+ 
+-bool protected_fs_file::generate_random_meta_data_key()
++bool generate_random_meta_data_key(protected_fs_file_t *pfs_file)
+ {
+-	if (use_user_kdk_key == 1)
++    if (!pfs_file)
++        return false;
++
++	if (pfs_file->use_user_kdk_key == 1)
+ 	{
+-		return generate_secure_blob_from_user_kdk(false);
++		return generate_secure_blob_from_user_kdk(pfs_file, false);
+ 	}
+ 
+ 	// derive a random key from the enclave sealing key	
+@@ -223,13 +240,13 @@ bool protected_fs_file::generate_random_meta_data_key()
+ 	key_request.key_name = SGX_KEYSELECT_SEAL;
+ 	key_request.key_policy = SGX_KEYPOLICY_MRSIGNER;
+ 
+-	memcpy(&key_request.cpu_svn, &report.body.cpu_svn, sizeof(sgx_cpu_svn_t));
+-	memcpy(&key_request.isv_svn, &report.body.isv_svn, sizeof(sgx_isv_svn_t));
++	memcpy(&key_request.cpu_svn, &pfs_file->report.body.cpu_svn, sizeof(sgx_cpu_svn_t));
++	memcpy(&key_request.isv_svn, &pfs_file->report.body.isv_svn, sizeof(sgx_isv_svn_t));
+ 
+ #ifdef PROTFS_DEBUG
+ 	DBG_PRINT("");
+-	PRINT_BUF("CPU_SVN", (uint8_t *)&report.body.cpu_svn, sizeof(sgx_cpu_svn_t));
+-	PRINT_BUF("ISV_SVN", (uint8_t *)&report.body.isv_svn, sizeof(sgx_isv_svn_t));
++	PRINT_BUF("CPU_SVN", (uint8_t *)&pfs_file->report.body.cpu_svn, sizeof(sgx_cpu_svn_t));
++	PRINT_BUF("ISV_SVN", (uint8_t *)&pfs_file->report.body.isv_svn, sizeof(sgx_isv_svn_t));
+ #endif
+ 
+     key_request.attribute_mask.flags = TSEAL_DEFAULT_FLAGSMASK;
+@@ -239,43 +256,46 @@ bool protected_fs_file::generate_random_meta_data_key()
+ 	sgx_status_t status = sgx_read_rand((unsigned char*)&key_request.key_id, sizeof(sgx_key_id_t));
+ 	if (status != SGX_SUCCESS)
+ 	{
+-		last_error = status;
++	    pfs_file->last_error = status;
+ 		return false;
+ 	}
+ 	
+-	status = sgx_get_key(&key_request, &cur_key);
++	status = sgx_get_key(&key_request, &pfs_file->cur_key);
+ 	if (status != SGX_SUCCESS)
+ 	{
+-		last_error = status;
++	    pfs_file->last_error = status;
+ 		return false;
+ 	}
+ 
+ 	// save the key_id and svn's so the key can be restored even if svn's are updated
+-	memcpy(&file_meta_data.plain_part.meta_data_key_id, &key_request.key_id, sizeof(sgx_key_id_t)); // save this value in the meta data
+-	memcpy(&file_meta_data.plain_part.cpu_svn, &key_request.cpu_svn, sizeof(sgx_cpu_svn_t));
+-	memcpy(&file_meta_data.plain_part.isv_svn, &key_request.isv_svn, sizeof(sgx_isv_svn_t));
++	memcpy(&pfs_file->file_meta_data.plain_part.meta_data_key_id, &key_request.key_id, sizeof(sgx_key_id_t)); // save this value in the meta data
++	memcpy(&pfs_file->file_meta_data.plain_part.cpu_svn, &key_request.cpu_svn, sizeof(sgx_cpu_svn_t));
++	memcpy(&pfs_file->file_meta_data.plain_part.isv_svn, &key_request.isv_svn, sizeof(sgx_isv_svn_t));
+ 
+ 	return true;
+ }
+ 
+ 
+-bool protected_fs_file::restore_current_meta_data_key(const sgx_aes_gcm_128bit_key_t* import_key)
++bool restore_current_meta_data_key(protected_fs_file_t *pfs_file, const sgx_aes_gcm_128bit_key_t* import_key)
+ {
+-	if (import_key != NULL)
++	if (!pfs_file)
++	    return false;
++
++    if (import_key != NULL)
+ 	{		
+-		memcpy(&cur_key, import_key, sizeof(sgx_aes_gcm_128bit_key_t));
++		memcpy(&pfs_file->cur_key, import_key, sizeof(sgx_aes_gcm_128bit_key_t));
+ 		return true;
+ 	}
+ 
+-	if (use_user_kdk_key == 1)
++	if (pfs_file->use_user_kdk_key == 1)
+ 	{
+-		return generate_secure_blob_from_user_kdk(true);
++		return generate_secure_blob_from_user_kdk(pfs_file, true);
+ 	}
+ 
+ 	sgx_key_id_t empty_key_id = {0};
+-	if (consttime_memequal(&file_meta_data.plain_part.meta_data_key_id, &empty_key_id, sizeof(sgx_key_id_t)) == 1)
++	if (consttime_memequal(&pfs_file->file_meta_data.plain_part.meta_data_key_id, &empty_key_id, sizeof(sgx_key_id_t)) == 1)
+ 	{
+-		last_error = SGX_ERROR_FILE_NO_KEY_ID;
++	    pfs_file->last_error = SGX_ERROR_FILE_NO_KEY_ID;
+ 		return false;
+ 	}
+ 
+@@ -289,14 +309,14 @@ bool protected_fs_file::restore_current_meta_data_key(const sgx_aes_gcm_128bit_k
+     key_request.attribute_mask.xfrm = 0x0;
+ 	key_request.misc_mask = TSEAL_DEFAULT_MISCMASK;
+ 
+-	memcpy(&key_request.cpu_svn, &file_meta_data.plain_part.cpu_svn, sizeof(sgx_cpu_svn_t));
+-	memcpy(&key_request.isv_svn, &file_meta_data.plain_part.isv_svn, sizeof(sgx_isv_svn_t));
+-	memcpy(&key_request.key_id, &file_meta_data.plain_part.meta_data_key_id, sizeof(sgx_key_id_t));
++	memcpy(&key_request.cpu_svn, &pfs_file->file_meta_data.plain_part.cpu_svn, sizeof(sgx_cpu_svn_t));
++	memcpy(&key_request.isv_svn, &pfs_file->file_meta_data.plain_part.isv_svn, sizeof(sgx_isv_svn_t));
++	memcpy(&key_request.key_id, &pfs_file->file_meta_data.plain_part.meta_data_key_id, sizeof(sgx_key_id_t));
+ 
+-	sgx_status_t status = sgx_get_key(&key_request, &cur_key);
++	sgx_status_t status = sgx_get_key(&key_request, &pfs_file->cur_key);
+ 	if (status != SGX_SUCCESS)
+ 	{
+-		last_error = status;
++	    pfs_file->last_error = status;
+ 		return false;
+ 	}
+ 
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/file_flush.cpp b/sdk/protected_fs/sgx_tprotected_fs/file_flush.cpp
+index a1f0109..f7254e9 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/file_flush.cpp
++++ b/sdk/protected_fs/sgx_tprotected_fs/file_flush.cpp
+@@ -34,42 +34,57 @@
+ #include "protected_fs_file.h"
+ #include <tprotected_fs.h>
+ 
+-bool protected_fs_file::flush(/*bool mc*/)
++#include "list.h"
++
++static bool write_recovery_file(protected_fs_file_t *pfs_file);
++static bool set_update_flag(protected_fs_file_t *pfs_file, bool flush_to_disk);
++static void clear_update_flag(protected_fs_file_t *pfs_file);
++static bool update_all_data_and_mht_nodes(protected_fs_file_t *pfs_file);
++static bool update_meta_data_node(protected_fs_file_t *pfs_file);
++
++
++bool pfs_file_flush(protected_fs_file_t *pfs_file/*bool mc*/)
+ {
+ 	bool result = false;
+ 
+-	int32_t result32 = sgx_thread_mutex_lock(&mutex);
++	if (!pfs_file)
++	    return false;
++
++	int32_t result32 = sgx_thread_mutex_lock(&pfs_file->mutex);
+ 	if (result32 != 0)
+ 	{
+-		last_error = result32;
+-		file_status = SGX_FILE_STATUS_MEMORY_CORRUPTED;
++		pfs_file->last_error = result32;
++		pfs_file->file_status = SGX_FILE_STATUS_MEMORY_CORRUPTED;
+ 		return false;
+ 	}
+ 
+-	if (file_status != SGX_FILE_STATUS_OK)
++	if (pfs_file->file_status != SGX_FILE_STATUS_OK)
+ 	{
+-		last_error = SGX_ERROR_FILE_BAD_STATUS;
+-		sgx_thread_mutex_unlock(&mutex);
++		pfs_file->last_error = SGX_ERROR_FILE_BAD_STATUS;
++		sgx_thread_mutex_unlock(&pfs_file->mutex);
+ 		return false;
+ 	}
+ 	
+-	result = internal_flush(/*mc,*/ true);
++	result = internal_flush(pfs_file, /*mc,*/ true);
+ 	if (result == false)
+ 	{
+-		assert(file_status != SGX_FILE_STATUS_OK);
+-		if (file_status == SGX_FILE_STATUS_OK)
+-			file_status = SGX_FILE_STATUS_FLUSH_ERROR; // for release set this anyway
++		assert(pfs_file->file_status != SGX_FILE_STATUS_OK);
++		if (pfs_file->file_status == SGX_FILE_STATUS_OK)
++			pfs_file->file_status = SGX_FILE_STATUS_FLUSH_ERROR; // for release set this anyway
+ 	}
+ 
+-	sgx_thread_mutex_unlock(&mutex);
++	sgx_thread_mutex_unlock(&pfs_file->mutex);
+ 
+ 	return result;
+ }
+ 
+ 
+-bool protected_fs_file::internal_flush(/*bool mc,*/ bool flush_to_disk)
++bool internal_flush(protected_fs_file_t *pfs_file, /*bool mc,*/ bool flush_to_disk)
+ {
+-	if (need_writing == false) // no changes at all
++    if (!pfs_file)
++        return false;
++
++    if (pfs_file->need_writing == false) // no changes at all
+ 		return true;
+ 
+ /*
+@@ -79,24 +94,24 @@ bool protected_fs_file::internal_flush(/*bool mc,*/ bool flush_to_disk)
+ 		return false;
+ 	}
+ */
+-	if (encrypted_part_plain.size > MD_USER_DATA_SIZE && root_mht.need_writing == true) // otherwise it's just one write - the meta-data node
++	if (pfs_file->encrypted_part_plain.size > MD_USER_DATA_SIZE && pfs_file->root_mht.need_writing == true) // otherwise it's just one write - the meta-data node
+ 	{
+-		if (_RECOVERY_HOOK_(0) || write_recovery_file() != true)
++		if (_RECOVERY_HOOK_(0) || write_recovery_file(pfs_file) != true)
+ 		{
+-			file_status = SGX_FILE_STATUS_FLUSH_ERROR;
++			pfs_file->file_status = SGX_FILE_STATUS_FLUSH_ERROR;
+ 			return false;
+ 		}
+ 
+-		if (_RECOVERY_HOOK_(1) || set_update_flag(flush_to_disk) != true)
++		if (_RECOVERY_HOOK_(1) || set_update_flag(pfs_file, flush_to_disk) != true)
+ 		{
+-			file_status = SGX_FILE_STATUS_FLUSH_ERROR;
++			pfs_file->file_status = SGX_FILE_STATUS_FLUSH_ERROR;
+ 			return false;
+ 		}
+ 
+-		if (_RECOVERY_HOOK_(2) || update_all_data_and_mht_nodes() != true)
++		if (_RECOVERY_HOOK_(2) || update_all_data_and_mht_nodes(pfs_file) != true)
+ 		{
+-			clear_update_flag();
+-			file_status = SGX_FILE_STATUS_CRYPTO_ERROR; // this is something that shouldn't happen, can't fix this...
++			clear_update_flag(pfs_file);
++			pfs_file->file_status = SGX_FILE_STATUS_CRYPTO_ERROR; // this is something that shouldn't happen, can't fix this...
+ 			return false;
+ 		}
+ 	}
+@@ -122,28 +137,28 @@ bool protected_fs_file::internal_flush(/*bool mc,*/ bool flush_to_disk)
+ 		encrypted_part_plain.mc_value++;
+ 	}
+ */
+-	if (_RECOVERY_HOOK_(3) || update_meta_data_node() != true)
++	if (_RECOVERY_HOOK_(3) || update_meta_data_node(pfs_file) != true)
+ 	{
+-		clear_update_flag();
++		clear_update_flag(pfs_file);
+ 		/*
+ 		if (mc == true)
+ 			encrypted_part_plain.mc_value--; // don't have to do this as the file cannot be fixed, but doing it anyway to prevent future errors
+ 		*/
+-		file_status = SGX_FILE_STATUS_CRYPTO_ERROR; // this is something that shouldn't happen, can't fix this...
++		pfs_file->file_status = SGX_FILE_STATUS_CRYPTO_ERROR; // this is something that shouldn't happen, can't fix this...
+ 		return false;
+ 	}
+ 
+-	if (_RECOVERY_HOOK_(4) || write_all_changes_to_disk(flush_to_disk) != true)
++	if (_RECOVERY_HOOK_(4) || write_all_changes_to_disk(pfs_file, flush_to_disk) != true)
+ 	{
+ 		//if (mc == false)
+-			file_status = SGX_FILE_STATUS_WRITE_TO_DISK_FAILED; // special case, need only to repeat write_all_changes_to_disk in order to repair it
++			pfs_file->file_status = SGX_FILE_STATUS_WRITE_TO_DISK_FAILED; // special case, need only to repeat write_all_changes_to_disk in order to repair it
+ 		//else
+ 			//file_status = SGX_FILE_STATUS_WRITE_TO_DISK_FAILED_NEED_MC; // special case, need to repeat write_all_changes_to_disk AND increase the monotonic counter in order to repair it
+ 
+ 		return false;
+ 	}
+ 
+-	need_writing = false;
++	pfs_file->need_writing = false;
+ 
+ /* this is causing problems when we delete and create the file rapidly
+    we will just leave the file, and re-write it every time
+@@ -171,24 +186,24 @@ bool protected_fs_file::internal_flush(/*bool mc,*/ bool flush_to_disk)
+ }
+ 
+ 
+-bool protected_fs_file::write_recovery_file()
++static bool write_recovery_file(protected_fs_file_t *pfs_file)
+ {
+ 	void* recovery_file = NULL;
+ 	sgx_status_t status;
+ 	uint8_t result = 0;
+ 	int32_t result32 = 0;
+ 
+-	status = (sgx_status_t)u_sgxprotectedfs_recovery_file_open_wrap(&recovery_file, recovery_filename);
++	status = (sgx_status_t)u_sgxprotectedfs_recovery_file_open_wrap(&recovery_file, pfs_file->recovery_filename);
+ 	if (status != SGX_SUCCESS || recovery_file == NULL)
+ 	{
+-		last_error = status != SGX_SUCCESS ? status : SGX_ERROR_FILE_CANT_OPEN_RECOVERY_FILE;
++		pfs_file->last_error = status != SGX_SUCCESS ? status : SGX_ERROR_FILE_CANT_OPEN_RECOVERY_FILE;
+ 		return false;
+ 	}
+ 
+ 	void* data = NULL;
+ 	recovery_node_t* recovery_node = NULL;
+ 
+-	for (data = cache.get_first() ; data != NULL ; data = cache.get_next())
++	for (data = get_first(&pfs_file->cache) ; data != NULL ; data = get_next(&pfs_file->cache))
+ 	{
+ 		if (((file_data_node_t*)data)->type == FILE_DATA_NODE_TYPE) // type is in the same offset in both node types
+ 		{
+@@ -212,30 +227,30 @@ bool protected_fs_file::write_recovery_file()
+ 		if (status != SGX_SUCCESS || result != 0)
+ 		{
+ 			u_sgxprotectedfs_fclose_wrap(&result32, recovery_file);
+-			u_sgxprotectedfs_remove_wrap(&result32, recovery_filename);
+-			last_error = status != SGX_SUCCESS ? status : SGX_ERROR_FILE_CANT_WRITE_RECOVERY_FILE;
++			u_sgxprotectedfs_remove_wrap(&result32, pfs_file->recovery_filename);
++			pfs_file->last_error = status != SGX_SUCCESS ? status : SGX_ERROR_FILE_CANT_WRITE_RECOVERY_FILE;
+ 			return false;
+ 		}
+ 	}
+ 
+-	if (root_mht.need_writing == true && root_mht.new_node == false)
++	if (pfs_file->root_mht.need_writing == true && pfs_file->root_mht.new_node == false)
+ 	{
+-		status = (sgx_status_t)u_sgxprotectedfs_fwrite_recovery_node_wrap(&result, recovery_file, (uint8_t*)&root_mht.recovery_node, sizeof(recovery_node_t));
++		status = (sgx_status_t)u_sgxprotectedfs_fwrite_recovery_node_wrap(&result, recovery_file, (uint8_t*)&pfs_file->root_mht.recovery_node, sizeof(recovery_node_t));
+ 		if (status != SGX_SUCCESS || result != 0)
+ 		{
+ 			u_sgxprotectedfs_fclose_wrap(&result32, recovery_file);
+-			u_sgxprotectedfs_remove_wrap(&result32, recovery_filename);
+-			last_error = status != SGX_SUCCESS ? status : SGX_ERROR_FILE_CANT_WRITE_RECOVERY_FILE;
++			u_sgxprotectedfs_remove_wrap(&result32, pfs_file->recovery_filename);
++			pfs_file->last_error = status != SGX_SUCCESS ? status : SGX_ERROR_FILE_CANT_WRITE_RECOVERY_FILE;
+ 			return false;
+ 		}
+ 	}
+ 
+-	status = (sgx_status_t)u_sgxprotectedfs_fwrite_recovery_node_wrap(&result, recovery_file, (uint8_t*)&meta_data_recovery_node, sizeof(recovery_node_t));
++	status = (sgx_status_t)u_sgxprotectedfs_fwrite_recovery_node_wrap(&result, recovery_file, (uint8_t*)&pfs_file->meta_data_recovery_node, sizeof(recovery_node_t));
+ 	if (status != SGX_SUCCESS || result != 0)
+ 	{
+ 		u_sgxprotectedfs_fclose_wrap(&result32, recovery_file);
+-		u_sgxprotectedfs_remove_wrap(&result32, recovery_filename);
+-		last_error = status != SGX_SUCCESS ? status : SGX_ERROR_FILE_CANT_WRITE_RECOVERY_FILE;
++		u_sgxprotectedfs_remove_wrap(&result32, pfs_file->recovery_filename);
++		pfs_file->last_error = status != SGX_SUCCESS ? status : SGX_ERROR_FILE_CANT_WRITE_RECOVERY_FILE;
+ 		return false;
+ 	}
+ 
+@@ -245,29 +260,32 @@ bool protected_fs_file::write_recovery_file()
+ }
+ 
+ 
+-bool protected_fs_file::set_update_flag(bool flush_to_disk)
++static bool set_update_flag(protected_fs_file_t *pfs_file, bool flush_to_disk)
+ {
+ 	sgx_status_t status;
+ 	uint8_t result;
+ 	int32_t result32;
+ 
+-	file_meta_data.plain_part.update_flag = 1;
+-	status = (sgx_status_t)u_sgxprotectedfs_fwrite_node_wrap(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
+-	file_meta_data.plain_part.update_flag = 0; // turn it off in memory. at the end of the flush, when we'll write the meta-data to disk, this flag will also be cleared there.
++	if (!pfs_file)
++	    return false;
++
++	pfs_file->file_meta_data.plain_part.update_flag = 1;
++	status = (sgx_status_t)u_sgxprotectedfs_fwrite_node_wrap(&result32, pfs_file->file, 0, (uint8_t*)&pfs_file->file_meta_data, NODE_SIZE);
++	pfs_file->file_meta_data.plain_part.update_flag = 0; // turn it off in memory. at the end of the flush, when we'll write the meta-data to disk, this flag will also be cleared there.
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+-		last_error = (status != SGX_SUCCESS) ? status : 
++		pfs_file->last_error = (status != SGX_SUCCESS) ? status :
+ 					 (result32 != -1) ? result32 : EIO;
+ 		return false;
+ 	}
+ 
+ 	if (flush_to_disk == true)
+ 	{
+-		status = (sgx_status_t)u_sgxprotectedfs_fflush_wrap(&result, file);
++		status = (sgx_status_t)u_sgxprotectedfs_fflush_wrap(&result, pfs_file->file);
+ 		if (status != SGX_SUCCESS || result != 0)
+ 		{
+-			last_error = status != SGX_SUCCESS ? status : SGX_ERROR_FILE_FLUSH_FAILED;
+-			u_sgxprotectedfs_fwrite_node_wrap(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE); // try to clear the update flag, in the OS cache at least...
++			pfs_file->last_error = status != SGX_SUCCESS ? status : SGX_ERROR_FILE_FLUSH_FAILED;
++			u_sgxprotectedfs_fwrite_node_wrap(&result32, pfs_file->file, 0, (uint8_t*)&pfs_file->file_meta_data, NODE_SIZE); // try to clear the update flag, in the OS cache at least...
+ 			return false;
+ 		}
+ 
+@@ -279,33 +297,81 @@ bool protected_fs_file::set_update_flag(bool flush_to_disk)
+ 
+ // this function is called if we had an error after we updated the update flag
+ // in normal flow, the flag is cleared when the meta-data is written to disk
+-void protected_fs_file::clear_update_flag()
++static void clear_update_flag(protected_fs_file_t *pfs_file)
+ {
+ 	uint8_t result;
+ 	int32_t result32;
+ 
++    if (!pfs_file)
++        return;
++
+ 	if (_RECOVERY_HOOK_(3))
+ 		return;
+-	assert(file_meta_data.plain_part.update_flag == 0);
+-	u_sgxprotectedfs_fwrite_node_wrap(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
+-	u_sgxprotectedfs_fflush_wrap(&result, file);
++	assert(pfs_file->file_meta_data.plain_part.update_flag == 0);
++	u_sgxprotectedfs_fwrite_node_wrap(&result32, pfs_file->file, 0, (uint8_t*)&pfs_file->file_meta_data, NODE_SIZE);
++	u_sgxprotectedfs_fflush_wrap(&result, pfs_file->file);
+ }
+ 
++DEFINE_LIST(_file_mht_list_node);
++typedef struct _file_mht_list_node {
++  struct _file_mht_node* file_mht_node;
++  LIST_TYPE(_file_mht_list_node) list; // The list node
++} file_mht_list_node_t;
++
++DEFINE_LISTP(_file_mht_list_node);
++
++#define ALLOC_FILE_MHT_LIST_NODE(node_ptr) (node_ptr = (file_mht_list_node_t *)calloc(sizeof(file_mht_list_node_t), 1))
++#define FREE_FILE_MHT_LIST_NODE(node_ptr)   \
++    do {                                    \
++        if (node_ptr) {                     \
++            free(node_ptr);                 \
++            node_ptr = NULL;                \
++        }                                   \
++    } while (0)
+ 
+ // sort function, we need the mht nodes sorted before we start to update their gmac's
+-bool mht_order(const file_mht_node_t* first, const file_mht_node_t* second)
++//bool mht_sort(const file_mht_list_node_t* first, const file_mht_list_node_t* second)
++bool mht_sort(void* first, void* second)
+ {// higher (lower tree level) node number first
+-	return first->mht_node_number > second->mht_node_number;
++
++    if (!first || !second)
++        return false;
++
++    return (((file_mht_list_node_t* )first)->file_mht_node->mht_node_number >
++                ((file_mht_list_node_t* )second)->file_mht_node->mht_node_number);
+ }
+ 
++#ifdef DEBUG_CODE
++static void temp_print_list(LISTP_TYPE(_file_mht_list_node) * the_list) {
++    file_mht_list_node_t *f, *n;
++  int i = 0;
++
++  if (!the_list)
++    return;
+ 
+-bool protected_fs_file::update_all_data_and_mht_nodes()
++  DBG_PRINT("printing list \n");
++  LISTP_FOR_EACH_ENTRY_SAFE(f, n, the_list, list) {
++    DBG_PRINT("list index=%d, ptr=%p, list-val=%lu\n", i++, f, f->file_mht_node->mht_node_number);
++  }
++}
++#endif
++
++static bool update_all_data_and_mht_nodes(protected_fs_file_t *pfs_file)
+ {
+-	std::list<file_mht_node_t*> mht_list;
+-	std::list<file_mht_node_t*>::iterator mht_list_it;
+-	file_mht_node_t* file_mht_node;
+-	sgx_status_t status;
+-	void* data = cache.get_first();
++    file_mht_node_t* file_mht_node = NULL;
++    file_mht_list_node_t*  file_mht_list_node = NULL;
++
++    if (!pfs_file)
++        return false;
++
++    LISTP_TYPE(_file_mht_list_node) the_list = LISTP_INIT;
++    LISTP_SET_SORT_FUNCTION(&the_list, mht_sort);
++
++    sgx_status_t status;
++	void* data = get_first(&pfs_file->cache);
++	bool bool_ret = true;
++
++    DBG_PRINT("%s: %d:\n", __func__, __LINE__);
+ 
+ 	// 1. encrypt the changed data
+ 	// 2. set the IV+GMAC in the parent MHT
+@@ -318,24 +384,24 @@ bool protected_fs_file::update_all_data_and_mht_nodes()
+ 
+ 			if (data_node->need_writing == true)
+ 			{
+-				if (derive_random_node_key(data_node->physical_node_number) == false)
++				if (derive_random_node_key(pfs_file, data_node->physical_node_number) == false)
+ 					return false;
+ 
+ 				gcm_crypto_data_t* gcm_crypto_data = &data_node->parent->plain.data_nodes_crypto[data_node->data_node_number % ATTACHED_DATA_NODES_COUNT];
+ 
+ 				// encrypt the data, this also saves the gmac of the operation in the mht crypto node
+-				status = sgx_rijndael128GCM_encrypt(&cur_key, data_node->plain.data, NODE_SIZE, data_node->encrypted.cipher, 
+-													empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &gcm_crypto_data->gmac);
++				status = sgx_rijndael128GCM_encrypt(&pfs_file->cur_key, data_node->plain.data, NODE_SIZE, data_node->encrypted.cipher,
++				        pfs_file->empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &gcm_crypto_data->gmac);
+ 
+ 			        DBG_PRINT("after sgx_gcm_enc, status=%d\n", (int)status);
+ 
+ 				if (status != SGX_SUCCESS)
+ 				{
+-					last_error = status;
++					pfs_file->last_error = status;
+ 					return false;
+ 				}
+ 
+-				memcpy(gcm_crypto_data->key, cur_key, sizeof(sgx_aes_gcm_128bit_key_t)); // save the key used for this encryption
++				memcpy(gcm_crypto_data->key, pfs_file->cur_key, sizeof(sgx_aes_gcm_128bit_key_t)); // save the key used for this encryption
+ 
+ 				file_mht_node = data_node->parent;
+ 
+@@ -346,103 +412,147 @@ bool protected_fs_file::update_all_data_and_mht_nodes()
+ 					file_mht_node->need_writing = true; // just in case, for release
+ 					file_mht_node = file_mht_node->parent;
+ 				}
++			    DBG_PRINT("%s: %d: encrypted data node->%p in cache\n", __func__, __LINE__, data);
+ 			}
+ 		}
+-		data = cache.get_next();
++		data = get_next(&pfs_file->cache);
+ 	}
+ 
++	/*Note: Calling alloc_node(for _file_mht_node_list),
++	 * and then adding it to the list. And then after pop, freeing the node.
++	 * This will still leave the data pointer(to cache) in-tact. */
+ 	// add all the mht nodes that needs writing to a list
+-	data = cache.get_first();
++	data = get_first(&pfs_file->cache);
+ 	while (data != NULL)
+ 	{
+ 		if (((file_mht_node_t*)data)->type == FILE_MHT_NODE_TYPE) // type is in the same offset in both node types
+ 		{
+ 			file_mht_node = (file_mht_node_t*)data;
+ 
+-			if (file_mht_node->need_writing == true)
+-				mht_list.push_front(file_mht_node);
++			if (file_mht_node->need_writing == true) {
++			    //mht_list.push_front(file_mht_node);
++			    //file_mht_list_node = ALLOC_FILE_MHT_LIST_NODE(file_mht_list_node);
++                ALLOC_FILE_MHT_LIST_NODE(file_mht_list_node);
++			    if (!file_mht_list_node) {
++			        bool_ret = false;
++			        goto list_cleanup;
++			    }
++			    file_mht_list_node->file_mht_node = (file_mht_node_t*)data;
++			    LISTP_PUSH_FRONT(file_mht_list_node, &the_list, list);
++			}
+ 		}
+-
+-		data = cache.get_next();
++		data = get_next(&pfs_file->cache);
+ 	}
+ 
++    DBG_PRINT("%s: %d: constructed list of size=%lu\n",
++            __func__, __LINE__, LISTP_SIZE(&the_list));
++
++#ifdef DEBUG_CODE
++    if (LISTP_SIZE(&the_list) > 0) {
++        DBG_PRINT("printing list, before SORT\n");
++        temp_print_list(&the_list);
++    }
++#endif
++
+ 	// sort the list from the last node to the first (bottom layers first)
+-	mht_list.sort(mht_order);
++	LISTP_SORT(&the_list, _file_mht_list_node);
++
++#ifdef DEBUG_CODE
++	if (LISTP_SIZE(&the_list) > 0) {
++        DBG_PRINT("printing list, AFTER SORT\n");
++        temp_print_list(&the_list);
++    }
++#endif
+ 
+ 	// update the gmacs in the parents
+-	while ((mht_list_it = mht_list.begin()) != mht_list.end())
++	//while ((mht_list_it = mht_list.begin()) != mht_list.end())
++	while ((file_mht_list_node = LISTP_FIRST_ENTRY(&the_list, file_mht_list_node_t, list)) != NULL)
+ 	{
+-		file_mht_node = *mht_list_it;
++		file_mht_node = file_mht_list_node->file_mht_node;
+ 
+ 		gcm_crypto_data_t* gcm_crypto_data = &file_mht_node->parent->plain.mht_nodes_crypto[(file_mht_node->mht_node_number - 1) % CHILD_MHT_NODES_COUNT];
+ 
+-		if (derive_random_node_key(file_mht_node->physical_node_number) == false)
++		if (derive_random_node_key(pfs_file, file_mht_node->physical_node_number) == false)
+ 		{
+-			mht_list.clear();
+-			return false;
++		    //mht_list.clear();
++		    bool_ret = false;
++            goto list_cleanup;
+ 		}
+ 
+-		status = sgx_rijndael128GCM_encrypt(&cur_key, (const uint8_t*)&file_mht_node->plain, NODE_SIZE, file_mht_node->encrypted.cipher, 
+-											empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &gcm_crypto_data->gmac);
++		status = sgx_rijndael128GCM_encrypt(&pfs_file->cur_key, (const uint8_t*)&file_mht_node->plain, NODE_SIZE, file_mht_node->encrypted.cipher,
++		        pfs_file->empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &gcm_crypto_data->gmac);
+ 
+                 DBG_PRINT("after sgx_gcm_enc, status=%d\n", (int)status);
+ 
+ 		if (status != SGX_SUCCESS)
+ 		{
+-			mht_list.clear();
+-			last_error = status;
+-			return false;
++			//mht_list.clear();
++			pfs_file->last_error = status;
++            bool_ret = false;
++            goto list_cleanup;
+ 		}
+ 
+-		memcpy(gcm_crypto_data->key, cur_key, sizeof(sgx_aes_gcm_128bit_key_t)); // save the key used for this gmac
+-
+-		mht_list.pop_front();
++		memcpy(gcm_crypto_data->key, pfs_file->cur_key, sizeof(sgx_aes_gcm_128bit_key_t)); // save the key used for this gmac
++		//mht_list.pop_front();
++        LISTP_DEL(file_mht_list_node, &the_list, list);
++        FREE_FILE_MHT_LIST_NODE(file_mht_list_node);
+ 	}
+ 
+ 	// update mht root gmac in the meta data node
+-	if (derive_random_node_key(root_mht.physical_node_number) == false)
+-		return false;
++	if (derive_random_node_key(pfs_file, pfs_file->root_mht.physical_node_number) == false) {
++        bool_ret = false;
++        goto list_cleanup;
++	}
+ 
+-	status = sgx_rijndael128GCM_encrypt(&cur_key, (const uint8_t*)&root_mht.plain, NODE_SIZE, root_mht.encrypted.cipher, 
+-										empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &encrypted_part_plain.mht_gmac);
++	status = sgx_rijndael128GCM_encrypt(&pfs_file->cur_key, (const uint8_t*)&pfs_file->root_mht.plain, NODE_SIZE, pfs_file->root_mht.encrypted.cipher,
++	        pfs_file->empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &pfs_file->encrypted_part_plain.mht_gmac);
+ 
+         DBG_PRINT("after sgx_gcm_enc, status=%d\n", (int)status);
+ 
+ 	if (status != SGX_SUCCESS)
+ 	{
+-		last_error = status;
+-		return false;
++		pfs_file->last_error = status;
++        bool_ret = false;
++        goto list_cleanup;
+ 	}
+ 
+-	memcpy(&encrypted_part_plain.mht_key, cur_key, sizeof(sgx_aes_gcm_128bit_key_t)); // save the key used for this gmac
++	memcpy(&pfs_file->encrypted_part_plain.mht_key, pfs_file->cur_key, sizeof(sgx_aes_gcm_128bit_key_t)); // save the key used for this gmac
+ 
+-	return true;
++    DBG_PRINT("%s: %d: updated hashes in merkel tree\n", __func__, __LINE__);
++
++list_cleanup:
++    LISTP_CLEAR_AND_FREE_EACH_LIST_ITEM(&the_list, _file_mht_list_node);
++
++	return bool_ret;
+ }
+ 
+ 
+-bool protected_fs_file::update_meta_data_node()
++static bool update_meta_data_node(protected_fs_file_t *pfs_file)
+ {
+ 	sgx_status_t status;
+ 	
++	if (!pfs_file)
++	    return false;
++
+ 	// randomize a new key, saves the key _id_ in the meta data plain part
+-	if (generate_random_meta_data_key() != true)
++	if (generate_random_meta_data_key(pfs_file) != true)
+ 	{
+ 		// last error already set
+ 		return false;
+ 	}
+ 		
+ 	// encrypt meta data encrypted part, also updates the gmac in the meta data plain part
+-	status = sgx_rijndael128GCM_encrypt(&cur_key, 
+-										(const uint8_t*)&encrypted_part_plain, sizeof(meta_data_encrypted_t), (uint8_t*)&file_meta_data.encrypted_part, 
+-										empty_iv, SGX_AESGCM_IV_SIZE, 
++	status = sgx_rijndael128GCM_encrypt(&pfs_file->cur_key,
++										(const uint8_t*)&pfs_file->encrypted_part_plain, sizeof(meta_data_encrypted_t), (uint8_t*)&pfs_file->file_meta_data.encrypted_part,
++										pfs_file->empty_iv, SGX_AESGCM_IV_SIZE,
+ 										NULL, 0, 
+-										&file_meta_data.plain_part.meta_data_gmac);
++										&pfs_file->file_meta_data.plain_part.meta_data_gmac);
+ 
+         DBG_PRINT("after sgx_gcm_enc, status=%d\n", (int)status);
+ 
+ 	if (status != SGX_SUCCESS)
+ 	{
+-		last_error = status;
++		pfs_file->last_error = status;
+ 		return false;
+ 	}
+ 
+@@ -450,13 +560,18 @@ bool protected_fs_file::update_meta_data_node()
+ }
+ 
+ 
+-bool protected_fs_file::write_all_changes_to_disk(bool flush_to_disk)
++bool write_all_changes_to_disk(protected_fs_file_t *pfs_file, bool flush_to_disk)
+ {
+ 	uint8_t result;
+ 	int32_t result32;
+ 	sgx_status_t status;
+ 
+-	if (encrypted_part_plain.size > MD_USER_DATA_SIZE && root_mht.need_writing == true)
++	if (!pfs_file)
++	    return false;
++
++    DBG_PRINT("%s:%d:\n", __func__, __LINE__);
++
++	if (pfs_file->encrypted_part_plain.size > MD_USER_DATA_SIZE && pfs_file->root_mht.need_writing == true)
+ 	{
+ 		void* data = NULL;
+ 		uint8_t* data_to_write;
+@@ -464,7 +579,7 @@ bool protected_fs_file::write_all_changes_to_disk(bool flush_to_disk)
+ 		file_data_node_t* file_data_node;
+ 		file_mht_node_t* file_mht_node;
+ 
+-		for (data = cache.get_first() ; data != NULL ; data = cache.get_next())
++		for (data = get_first(&pfs_file->cache) ; data != NULL ; data = get_next(&pfs_file->cache))
+ 		{
+ 			file_data_node = NULL;
+ 			file_mht_node = NULL;
+@@ -489,10 +604,10 @@ bool protected_fs_file::write_all_changes_to_disk(bool flush_to_disk)
+ 				node_number = file_mht_node->physical_node_number;
+ 			}
+ 
+-			status = (sgx_status_t)u_sgxprotectedfs_fwrite_node_wrap(&result32, file, node_number, data_to_write, NODE_SIZE);
++			status = (sgx_status_t)u_sgxprotectedfs_fwrite_node_wrap(&result32, pfs_file->file, node_number, data_to_write, NODE_SIZE);
+ 			if (status != SGX_SUCCESS || result32 != 0)
+ 			{
+-				last_error = (status != SGX_SUCCESS) ? status : 
++				pfs_file->last_error = (status != SGX_SUCCESS) ? status :
+ 							 (result32 != -1) ? result32 : EIO;
+ 				return false;
+ 			}
+@@ -508,51 +623,61 @@ bool protected_fs_file::write_all_changes_to_disk(bool flush_to_disk)
+ 				file_mht_node->need_writing = false;
+ 				file_mht_node->new_node = false;
+ 			}
+-
++		    DBG_PRINT("%s:%d:FLUSHED NODE NUMBER->%lu, NODE_TYPE->%s, NODE_PTR->%p\n",
++		            __func__, __LINE__, node_number,
++		            ((((file_data_node_t*)data)->type == FILE_DATA_NODE_TYPE)?"DATA_NODE":"MHT_NODE"),
++		            data);
+ 		}
+ 
+-		status = (sgx_status_t)u_sgxprotectedfs_fwrite_node_wrap(&result32, file, 1, (uint8_t*)&root_mht.encrypted, NODE_SIZE);
++		status = (sgx_status_t)u_sgxprotectedfs_fwrite_node_wrap(&result32, pfs_file->file, 1, (uint8_t*)&pfs_file->root_mht.encrypted, NODE_SIZE);
+ 		if (status != SGX_SUCCESS || result32 != 0)
+ 		{
+-			last_error = (status != SGX_SUCCESS) ? status : 
++			pfs_file->last_error = (status != SGX_SUCCESS) ? status :
+ 						 (result32 != -1) ? result32 : EIO;
+ 			return false;
+ 		}
+-		root_mht.need_writing = false;
+-		root_mht.new_node = false;
++		pfs_file->root_mht.need_writing = false;
++		pfs_file->root_mht.new_node = false;
++	    DBG_PRINT("%s:%d: FLUSHED ROOT MHT(Node Number 1)\n", __func__, __LINE__);
+ 	}
+ 
+-	status = (sgx_status_t)u_sgxprotectedfs_fwrite_node_wrap(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
++	status = (sgx_status_t)u_sgxprotectedfs_fwrite_node_wrap(&result32,  pfs_file->file, 0, (uint8_t*)&pfs_file->file_meta_data, NODE_SIZE);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+-		last_error = (status != SGX_SUCCESS) ? status : 
++		pfs_file->last_error = (status != SGX_SUCCESS) ? status :
+ 					 (result32 != -1) ? result32 : EIO;
+ 		return false;
+ 	}
+ 
++    DBG_PRINT("%s:%d: FLUSHED Meta Data Node(Node Number 0)\n", __func__, __LINE__);
++
+ 	if (flush_to_disk == true)
+ 	{
+-		status = (sgx_status_t)u_sgxprotectedfs_fflush_wrap(&result, file);
++		status = (sgx_status_t)u_sgxprotectedfs_fflush_wrap(&result, pfs_file->file);
+ 		if (status != SGX_SUCCESS || result != 0)
+ 		{
+-			last_error = status != SGX_SUCCESS ? status : SGX_ERROR_FILE_FLUSH_FAILED;
++			pfs_file->last_error = status != SGX_SUCCESS ? status : SGX_ERROR_FILE_FLUSH_FAILED;
+ 			return false;
+ 		}
++	    DBG_PRINT("%s:%d: FLUSHED WHOLE FILE\n", __func__, __LINE__);
+ 	}
+ 
+ 	return true;
+ }
+ 
+ 
+-void protected_fs_file::erase_recovery_file()
++void erase_recovery_file(protected_fs_file_t *pfs_file)
+ {
+ 	sgx_status_t status;
+ 	int32_t result32;
+ 
+-	if (recovery_filename[0] == '\0') // not initialized yet
++	if (!pfs_file)
++	    return;
++
++	if (pfs_file->recovery_filename[0] == '\0') // not initialized yet
+ 		return;
+ 
+-	status = (sgx_status_t)u_sgxprotectedfs_remove_wrap(&result32, recovery_filename);
++	status = (sgx_status_t)u_sgxprotectedfs_remove_wrap(&result32, pfs_file->recovery_filename);
+ 	(void)status; // don't care if it succeeded or failed...just remove the warning
+ }
+ 
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/file_init.cpp b/sdk/protected_fs/sgx_tprotected_fs/file_init.cpp
+index 49d0276..36513a7 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/file_init.cpp
++++ b/sdk/protected_fs/sgx_tprotected_fs/file_init.cpp
+@@ -33,19 +33,32 @@
+ #include "sgx_tprotected_fs_t.h"
+ #include "protected_fs_file.h"
+ 
+-#include "protfs_debug.h"
++#include "pfs_debug.h"
+ 
+ #include "sgx_proxy_sdk_tlibc.h"
+ 
+ #include "sgx_report.h"
+ #include <sgx_utils.h>
+ 
++static uint32_t init_fields(protected_fs_file_t* pfs_file);
++static bool cleanup_filename(protected_fs_file_t* pfs_file, const char* src, char* dest);
++static bool parse_mode(protected_fs_file_t* pfs_file, const char* mode);
++static bool file_recovery(protected_fs_file_t* pfs_file, const char* filename);
++static bool init_existing_file(protected_fs_file_t* pfs_file, const char* filename, const char* clean_filename, const sgx_aes_gcm_128bit_key_t* import_key);
++static bool init_new_file(protected_fs_file_t* pfs_file, const char* clean_filename);
++
++/*TODO: Check if they are other places in SDK code, where C++ memory alloc functions like new/delete are being used
++and replace.with calloc/free...applies to ALL files.*/
++
+ // remove the file path if it's there, leave only the filename, null terminated
+-bool protected_fs_file::cleanup_filename(const char* src, char* dest)
++static bool cleanup_filename(protected_fs_file_t* pfs_file, const char* src, char* dest)
+ {
+ 	const char* p = src;
+ 	const char* name = src;
+ 
++	if (!pfs_file)
++	        return false;
++
+ 	while ((*p) != '\0')
+ 	{
+ 		if ((*p) == '\\' || (*p) == '/')
+@@ -55,7 +68,7 @@ bool protected_fs_file::cleanup_filename(const char* src, char* dest)
+ 
+ 	if (strnlen(name, FILENAME_MAX_LEN) >= FILENAME_MAX_LEN-1)
+ 	{
+-		last_error = ENAMETOOLONG;
++		pfs_file->last_error = ENAMETOOLONG;
+ 		return false;
+ 	}
+ 
+@@ -64,101 +77,121 @@ bool protected_fs_file::cleanup_filename(const char* src, char* dest)
+ 
+ 	if (strnlen(dest, 1) == 0)
+ 	{
+-		last_error = EINVAL;
++	    pfs_file->last_error = EINVAL;
+ 		return false;
+ 	}
+ 
+ 	return true;
+ }
+ 
+-
+-protected_fs_file::protected_fs_file(const char* filename, const char* mode, const sgx_aes_gcm_128bit_key_t* import_key, const sgx_aes_gcm_128bit_key_t* kdk_key)
++uint32_t allocate_protected_fs_file(protected_fs_file_t** pfs_file, const char* filename, const char* mode, const sgx_aes_gcm_128bit_key_t* import_key, const sgx_aes_gcm_128bit_key_t* kdk_key)
+ {
+ 	sgx_status_t status = SGX_SUCCESS;
+ 	uint8_t result = 0;
+ 	int32_t result32 = 0;
+-	
+-	init_fields();
+-
+-	if (filename == NULL || mode == NULL || 
++    protected_fs_file_t* temp_pfs_file = NULL;
++    uint32_t ret_val = 0;
++    
++    DBG_PRINT("%s:%d\n", __func__, __LINE__);
++    
++    //unlike C++, prior to allocating object, we check for input params.
++	if (pfs_file == NULL || filename == NULL || mode == NULL || 
+ 		strnlen(filename, 1) == 0 || strnlen(mode, 1) == 0)
+ 	{
+-		last_error = EINVAL;
+-		return;
++		return EINVAL;
+ 	}
+ 
+ 	if (strnlen(filename, FULLNAME_MAX_LEN) >= FULLNAME_MAX_LEN - 1)
+ 	{
+-		last_error = ENAMETOOLONG;
+-		return;
++		return ENAMETOOLONG;
+ 	}
+ 
+ 	if (import_key != NULL && kdk_key != NULL)
+ 	{// import key is used only with auto generated keys
+-		last_error = EINVAL;
+-		return;
+-	}
++		return EINVAL;
++	}
++
++    //allocate object.
++    temp_pfs_file = (protected_fs_file_t* )malloc(sizeof(protected_fs_file_t));
++    
++    if (!temp_pfs_file)
++    {
++		return ENOMEM;    
++    }
++    
++	ret_val = init_fields(temp_pfs_file);
++	
++	if (ret_val != 0)
++	    goto error_exit;
+ 
+-	status = sgx_create_report(NULL, NULL, &report);
++#ifndef TEMP_HACK_TO_DISABLE_SGX
++	status = sgx_create_report(NULL, NULL, &temp_pfs_file->report);
+ 	if (status != SGX_SUCCESS)
+ 	{
+-		last_error = status;
+-		return;
++		ret_val = status;
++        goto error_exit;
+ 	}
++#endif
+ 
+-	result32 = sgx_thread_mutex_init(&mutex, NULL);
++	result32 = sgx_thread_mutex_init(&temp_pfs_file->mutex, NULL);
+ 	if (result32 != 0)
+ 	{
+-		last_error = result32;
+-		return;
++		ret_val = result32;
++        goto error_exit;
+ 	}
+ 
+-	if (init_session_master_key() == false) 
++	if (init_session_master_key(temp_pfs_file) == false) 
++	{
+ 		// last_error already set
+-		return;
+-
++		ret_val = temp_pfs_file->last_error;
++        goto error_exit;
++    }
++    
+ 	if (kdk_key != NULL)
+ 	{
+ 		// for new file, this value will later be saved in the meta data plain part (init_new_file)
+ 		// for existing file, we will later compare this value with the value from the file (init_existing_file)
+-		use_user_kdk_key = 1; 
+-		memcpy(user_kdk_key, kdk_key, sizeof(sgx_aes_gcm_128bit_key_t));
++		temp_pfs_file->use_user_kdk_key = 1; 
++		memcpy(temp_pfs_file->user_kdk_key, kdk_key, sizeof(sgx_aes_gcm_128bit_key_t));
+ 	}
+ 	
+ 	// get the clean file name (original name might be clean or with relative path or with absolute path...)
+ 	char clean_filename[FILENAME_MAX_LEN];
+-	if (cleanup_filename(filename, clean_filename) == false)
++	if (cleanup_filename(temp_pfs_file, filename, clean_filename) == false)
++	{
+ 		// last_error already set
+-		return;
++		ret_val = temp_pfs_file->last_error;
++        goto error_exit;
++	}
+ 	
+ 	if (import_key != NULL)
+ 	{// verify the key is not empty - note from SAFE review
+ 		sgx_aes_gcm_128bit_key_t empty_aes_key = {0};
+ 		if (consttime_memequal(import_key, &empty_aes_key, sizeof(sgx_aes_gcm_128bit_key_t)) == 1)
+ 		{
+-			last_error = EINVAL;
+-			return;
++			ret_val = EINVAL;
++            goto error_exit;
+ 		}
+ 	}
+ 
+-	if (parse_mode(mode) == false)
++	if (parse_mode(temp_pfs_file, mode) == false)
+ 	{
+-		last_error = EINVAL;
+-		return;
++		ret_val = EINVAL;
++        goto error_exit;
+ 	}
+ 
+ 	status = (sgx_status_t)u_sgxprotectedfs_check_if_file_exists_wrap(&result, filename); // if result == 1 --> file exists
+ 	if (status != SGX_SUCCESS)
+ 	{
+-		last_error = status;
+-		return;
++		ret_val = status;
++        goto error_exit;
+ 	}
+ 
+-	if (open_mode.write == 1 && result == 1)
++	if (temp_pfs_file->open_mode.write == 1 && result == 1)
+ 	{// try to delete existing file
+ 		int32_t saved_errno = 0;
+ 
+-		result32 = remove(filename);
++		result32 = pfs_file_remove(filename);
+ 		if (result32 != 0)
+ 		{
+ 			// either can't delete or the file was already deleted by someone else
+@@ -170,129 +203,169 @@ protected_fs_file::protected_fs_file(const char* filename, const char* mode, con
+ 		status = (sgx_status_t)u_sgxprotectedfs_check_if_file_exists_wrap(&result, filename);
+ 		if (status != SGX_SUCCESS || result == 1)
+ 		{
+-			last_error = (status != SGX_SUCCESS) ? status :
++			ret_val = (status != SGX_SUCCESS) ? status :
+ 						 (saved_errno != 0) ? saved_errno : EACCES;
+-			return;
++			goto error_exit;
+ 		}
+ 	}
+ 
+-	if (open_mode.read == 1 && result == 0)
++	if (temp_pfs_file->open_mode.read == 1 && result == 0)
+ 	{// file must exists
+-		last_error = ENOENT;
+-		return;
++		ret_val = ENOENT;
++		goto error_exit;
+ 	}
+ 
+ 	if (import_key != NULL && result == 0)
+ 	{// file must exists - otherwise the user key is not used
+-		last_error = ENOENT;
+-		return;
++		ret_val = ENOENT;
++		goto error_exit;
+ 	}
+ 
+ 	// now open the file
+-	read_only = (open_mode.read == 1 && open_mode.update == 0); // read only files can be opened simultaneously by many enclaves
++	temp_pfs_file->read_only = (temp_pfs_file->open_mode.read == 1 && temp_pfs_file->open_mode.update == 0); // read only files can be opened simultaneously by many enclaves
+ 
+ 	do {
+-		status = (sgx_status_t)u_sgxprotectedfs_exclusive_file_open_wrap(&file, filename, read_only, &real_file_size, &result32);
+-		if (status != SGX_SUCCESS || file == NULL)
++		status = (sgx_status_t)u_sgxprotectedfs_exclusive_file_open_wrap(&temp_pfs_file->file, filename, temp_pfs_file->read_only, &temp_pfs_file->real_file_size, &result32);
++		if (status != SGX_SUCCESS || temp_pfs_file->file == NULL)
+ 		{
+-			last_error = (status != SGX_SUCCESS) ? status :
++			ret_val = (status != SGX_SUCCESS) ? status :
+ 					     (result32 != 0) ? result32 : EACCES;
+ 			break;
+ 		}
+ 
+-		if (real_file_size < 0)
++		if (temp_pfs_file->real_file_size < 0)
+ 		{
+-			last_error = EINVAL;
++			ret_val = EINVAL;
+ 			break;
+ 		}
+ 
+-		if (real_file_size % NODE_SIZE != 0)
++		if (temp_pfs_file->real_file_size % NODE_SIZE != 0)
+ 		{
+-			last_error = SGX_ERROR_FILE_NOT_SGX_FILE;
++			ret_val = SGX_ERROR_FILE_NOT_SGX_FILE;
+ 			break;
+ 		}
+ 		
+-		strncpy(recovery_filename, filename, FULLNAME_MAX_LEN - 1); // copy full file name
+-		recovery_filename[FULLNAME_MAX_LEN - 1] = '\0'; // just to be safe
+-		size_t full_name_len = strnlen(recovery_filename, RECOVERY_FILE_MAX_LEN);
+-		strncpy(&recovery_filename[full_name_len], "_recovery", 10);
++		strncpy(temp_pfs_file->recovery_filename, filename, FULLNAME_MAX_LEN - 1); // copy full file name
++		temp_pfs_file->recovery_filename[FULLNAME_MAX_LEN - 1] = '\0'; // just to be safe
++		size_t full_name_len = strnlen(temp_pfs_file->recovery_filename, RECOVERY_FILE_MAX_LEN);
++		strncpy(&temp_pfs_file->recovery_filename[full_name_len], "_recovery", 10);
+ 
+-		if (real_file_size > 0)
++		if (temp_pfs_file->real_file_size > 0)
+ 		{// existing file
+-			if (open_mode.write == 1) // redundant check, just in case
++			if (temp_pfs_file->open_mode.write == 1) // redundant check, just in case
+ 			{
+-				last_error = EACCES;
++				ret_val = EACCES;
+ 				break;
+ 			}
+ 
+-			if (init_existing_file(filename, clean_filename, import_key) == false)
++			if (init_existing_file(temp_pfs_file, filename, clean_filename, import_key) == false)
++			{
++			    //Note: Just making sure, we set error here, in-case last_error is not set,
++			    //since they are several deeply nested function calls.
++			    ret_val = (temp_pfs_file->last_error != 0) ? temp_pfs_file->last_error : EINVAL;
+ 				break;
++            }				
+ 				
+-			if (open_mode.append == 1 && open_mode.update == 0)
+-				offset = encrypted_part_plain.size;
++			if (temp_pfs_file->open_mode.append == 1 && temp_pfs_file->open_mode.update == 0)
++				temp_pfs_file->offset = temp_pfs_file->encrypted_part_plain.size;
+ 		}
+ 		else
+ 		{// new file
+-			if (init_new_file(clean_filename) == false)
++			if (init_new_file(temp_pfs_file, clean_filename) == false)
++			{
++			    //Note: Just making sure, we set error here, in-case last_error is not set,
++			    //since they are several deeply nested function calls.
++			    ret_val = (temp_pfs_file->last_error != 0) ? temp_pfs_file->last_error : EINVAL;
+ 				break;
++			}
+ 		}
+ 
+-		file_status = SGX_FILE_STATUS_OK;
++		temp_pfs_file->file_status = SGX_FILE_STATUS_OK;
+ 
+ 	} while(0);
+ 
+-	if (file_status != SGX_FILE_STATUS_OK)
++    //Note: In init_fields, file_status is set to SGX_FILE_STATUS_NOT_INITIALIZED
++    //so if there are errors in do-while loop above..then we handle it here.
++	if (temp_pfs_file->file_status != SGX_FILE_STATUS_OK)
+ 	{
+-		if (file != NULL)
++		if (temp_pfs_file->file != NULL)
+ 		{
+-			u_sgxprotectedfs_fclose_wrap(&result32, file); // we don't care about the result
+-			file = NULL;
++			u_sgxprotectedfs_fclose_wrap(&result32, temp_pfs_file->file); // we don't care about the result
++			temp_pfs_file->file = NULL;
+ 		}
+-	}
++		ret_val = temp_pfs_file->file_status;
++	}
++
++error_exit:
++    //TODO: Make sure, we free(temp_pfs_file), for all error cases above.
++    if (ret_val != 0)
++    {
++        if (temp_pfs_file)
++            free(temp_pfs_file);        
++    }
++    else
++    {
++        *pfs_file = temp_pfs_file;
++    }
++    
++    return ret_val;
+ }
+ 
+ 
+-void protected_fs_file::init_fields()
++static uint32_t init_fields(protected_fs_file_t* pfs_file)
+ {
+-	meta_data_node_number = 0;
+-	memset(&file_meta_data, 0, sizeof(meta_data_node_t));
+-	memset(&encrypted_part_plain, 0, sizeof(meta_data_encrypted_t));
+-
+-	memset(&empty_iv, 0, sizeof(sgx_iv_t));
+-
+-	memset(&root_mht, 0, sizeof(file_mht_node_t));
+-	root_mht.type = FILE_MHT_NODE_TYPE;
+-	root_mht.physical_node_number = 1;
+-	root_mht.mht_node_number = 0;
+-	root_mht.new_node = true;
+-	root_mht.need_writing = false;
++
++    int cache_init_result = 0;
++    uint32_t ret_val = 0;
++    
++    if (!pfs_file)
++        return EINVAL;
++        
++	pfs_file->meta_data_node_number = 0;
++	memset(&pfs_file->file_meta_data, 0, sizeof(meta_data_node_t));
++	memset(&pfs_file->encrypted_part_plain, 0, sizeof(meta_data_encrypted_t));
++
++	memset(&pfs_file->empty_iv, 0, sizeof(sgx_iv_t));
++
++	memset(&pfs_file->root_mht, 0, sizeof(file_mht_node_t));
++	pfs_file->root_mht.type = FILE_MHT_NODE_TYPE;
++	pfs_file->root_mht.physical_node_number = 1;
++	pfs_file->root_mht.mht_node_number = 0;
++    pfs_file->root_mht.new_node = true;
++	pfs_file->root_mht.need_writing = false;
+ 	
+-	offset = 0;
+-	file = NULL;
+-	end_of_file = false;
+-	need_writing = false;
+-	read_only = 0;
+-	file_status = SGX_FILE_STATUS_NOT_INITIALIZED;
+-	last_error = SGX_SUCCESS;
+-	real_file_size = 0;	
+-	open_mode.raw = 0;
+-	use_user_kdk_key = 0;
+-	master_key_count = 0;
+-
+-	recovery_filename[0] = '\0';
++	pfs_file->offset = 0;
++	pfs_file->file = NULL;
++	pfs_file->end_of_file = false;
++	pfs_file->need_writing = false;
++	pfs_file->read_only = 0;
++	pfs_file->file_status = SGX_FILE_STATUS_NOT_INITIALIZED;
++	pfs_file->last_error = SGX_SUCCESS;
++	pfs_file->real_file_size = 0;	
++	pfs_file->open_mode.raw = 0;
++	pfs_file->use_user_kdk_key = 0;
++	pfs_file->master_key_count = 0;
++	pfs_file->recovery_filename[0] = '\0';
+ 	
+ 	//memset(&mutex, 0, sizeof(sgx_thread_mutex_t));
+-	memset(&mutex, 0, sizeof(pthread_mutex_t));
++	memset(&pfs_file->mutex, 0, sizeof(pthread_mutex_t));
+ 
+ 	// set hash size to fit MAX_PAGES_IN_CACHE
+-	cache.rehash(MAX_PAGES_IN_CACHE);
++	//cache.rehash(MAX_PAGES_IN_CACHE);
++	if ((cache_init_result = init_lru_cache(&pfs_file->cache)) != 0)
++    {
++        DBG_PRINT("error from init_lru_cache\n");
++        ret_val = (cache_init_result < 0) ? (-cache_init_result) : cache_init_result;
++    }
++    
++    return ret_val;
+ }
+ 
+ 
+ #define MAX_MODE_STRING_LEN 5
+-bool protected_fs_file::parse_mode(const char* mode)
++static bool parse_mode(protected_fs_file_t* pfs_file, const char* mode)
+ {
+-	if (mode == NULL) // re-check
++	if (pfs_file == NULL || mode == NULL) // re-check
+ 		return false;
+ 
+ 	size_t mode_len = strnlen(mode, MAX_MODE_STRING_LEN+1);
+@@ -304,85 +377,88 @@ bool protected_fs_file::parse_mode(const char* mode)
+ 		switch (mode[i])
+ 		{
+ 		case 'r':
+-			if (open_mode.write == 1 || open_mode.read == 1 || open_mode.append == 1)
++			if (pfs_file->open_mode.write == 1 || pfs_file->open_mode.read == 1 || pfs_file->open_mode.append == 1)
+ 				return false;
+-			open_mode.read = 1;
++			pfs_file->open_mode.read = 1;
+ 			break;
+ 		case 'w':
+-			if (open_mode.write == 1 || open_mode.read == 1 || open_mode.append == 1)
++			if (pfs_file->open_mode.write == 1 || pfs_file->open_mode.read == 1 || pfs_file->open_mode.append == 1)
+ 				return false;
+-			open_mode.write = 1;
++			pfs_file->open_mode.write = 1;
+ 			break;
+ 		case 'a':
+-			if (open_mode.write == 1 || open_mode.read == 1 || open_mode.append == 1)
++			if (pfs_file->open_mode.write == 1 || pfs_file->open_mode.read == 1 || pfs_file->open_mode.append == 1)
+ 				return false;
+-			open_mode.append = 1;
++			pfs_file->open_mode.append = 1;
+ 			break;
+ 		case 'b':
+-			if (open_mode.binary == 1)
++			if (pfs_file->open_mode.binary == 1)
+ 				return false;
+-			open_mode.binary = 1;
++			pfs_file->open_mode.binary = 1;
+ 			break;
+ 		case '+':
+-			if (open_mode.update == 1)
++			if (pfs_file->open_mode.update == 1)
+ 				return false;
+-			open_mode.update = 1;
++			pfs_file->open_mode.update = 1;
+ 			break;
+ 		default:
+ 			return false;
+ 		}
+ 	}
+ 
+-	if (open_mode.write == 0 && open_mode.read == 0 && open_mode.append == 0)
++	if (pfs_file->open_mode.write == 0 && pfs_file->open_mode.read == 0 && pfs_file->open_mode.append == 0)
+ 		return false;
+ 
+ 	return true;
+ }
+ 
+ 
+-bool protected_fs_file::file_recovery(const char* filename)
++static bool file_recovery(protected_fs_file_t* pfs_file, const char* filename)
+ {
+ 	sgx_status_t status = SGX_SUCCESS;
+ 	int32_t result32 = 0;
+ 	int64_t new_file_size = 0;
+ 
+-	status = (sgx_status_t)u_sgxprotectedfs_fclose_wrap(&result32, file);
++    if (!pfs_file || !filename)
++        return false;
++        
++	status = (sgx_status_t)u_sgxprotectedfs_fclose_wrap(&result32, pfs_file->file);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+-		last_error = (status != SGX_SUCCESS) ? status : 
++		pfs_file->last_error = (status != SGX_SUCCESS) ? status : 
+ 					 (result32 != -1) ? result32 : EINVAL;
+ 		return false;
+ 	}
+ 
+-	file = NULL;
++	pfs_file->file = NULL;
+ 
+-	status = (sgx_status_t)u_sgxprotectedfs_do_file_recovery_wrap(&result32, filename, recovery_filename, NODE_SIZE);
++	status = (sgx_status_t)u_sgxprotectedfs_do_file_recovery_wrap(&result32, filename, pfs_file->recovery_filename, NODE_SIZE);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+-		last_error = (status != SGX_SUCCESS) ? status :
++		pfs_file->last_error = (status != SGX_SUCCESS) ? status :
+ 					 (result32 != -1) ? result32 : EINVAL;
+ 		return false;
+ 	}
+ 
+-	status = (sgx_status_t)u_sgxprotectedfs_exclusive_file_open_wrap(&file, filename, read_only, &new_file_size, &result32);
+-	if (status != SGX_SUCCESS || file == NULL)
++	status = (sgx_status_t)u_sgxprotectedfs_exclusive_file_open_wrap(&pfs_file->file, filename, pfs_file->read_only, &new_file_size, &result32);
++	if (status != SGX_SUCCESS || pfs_file->file == NULL)
+ 	{
+-		last_error = (status != SGX_SUCCESS) ? status : 
++		pfs_file->last_error = (status != SGX_SUCCESS) ? status : 
+ 					 (result32 != 0) ? result32 : EACCES;
+ 		return false;
+ 	}
+ 
+ 	// recovery only change existing data, it does not shrink or grow the file
+-	if (new_file_size != real_file_size)
++	if (new_file_size != pfs_file->real_file_size)
+ 	{
+-		last_error = SGX_ERROR_UNEXPECTED;
++		pfs_file->last_error = SGX_ERROR_UNEXPECTED;
+ 		return false;
+ 	}
+ 
+-	status = (sgx_status_t)u_sgxprotectedfs_fread_node_wrap(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
++	status = (sgx_status_t)u_sgxprotectedfs_fread_node_wrap(&result32, pfs_file->file, 0, (uint8_t*)&pfs_file->file_meta_data, NODE_SIZE);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+-		last_error = (status != SGX_SUCCESS) ? status : 
++		pfs_file->last_error = (status != SGX_SUCCESS) ? status : 
+ 					 (result32 != -1) ? result32 : EIO;
+ 		return false;
+ 	}
+@@ -391,80 +467,83 @@ bool protected_fs_file::file_recovery(const char* filename)
+ }
+ 
+ 
+-bool protected_fs_file::init_existing_file(const char* filename, const char* clean_filename, const sgx_aes_gcm_128bit_key_t* import_key)
++static bool init_existing_file(protected_fs_file_t* pfs_file, const char* filename, const char* clean_filename, const sgx_aes_gcm_128bit_key_t* import_key)
+ {
+ 	sgx_status_t status;
+ 	int32_t result32;
+ 
++    if (!pfs_file)
++        return false;
++
+ 	// read meta-data node
+-	status = (sgx_status_t)u_sgxprotectedfs_fread_node_wrap(&result32, file, 0, (uint8_t*)&file_meta_data, NODE_SIZE);
++	status = (sgx_status_t)u_sgxprotectedfs_fread_node_wrap(&result32, pfs_file->file, 0, (uint8_t*)&pfs_file->file_meta_data, NODE_SIZE);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+-		last_error = (status != SGX_SUCCESS) ? status : 
++		pfs_file->last_error = (status != SGX_SUCCESS) ? status : 
+ 					 (result32 != -1) ? result32 : EIO;
+ 		return false;
+ 	}
+ 
+-	if (file_meta_data.plain_part.file_id != SGX_FILE_ID)
+-	{// such a file exists, but it is not an SGX file
+-		last_error = SGX_ERROR_FILE_NOT_SGX_FILE;
++	if (pfs_file->file_meta_data.plain_part.file_id != SGX_FILE_ID)
++	{   // such a file exists, but it is not an SGX file
++		pfs_file->last_error = SGX_ERROR_FILE_NOT_SGX_FILE;
+ 		return false;
+ 	}
+ 
+-	if (file_meta_data.plain_part.major_version != SGX_FILE_MAJOR_VERSION)
++	if (pfs_file->file_meta_data.plain_part.major_version != SGX_FILE_MAJOR_VERSION)
+ 	{
+-		last_error = ENOTSUP;
++		pfs_file->last_error = ENOTSUP;
+ 		return false;
+ 	}
+ 
+-	if (file_meta_data.plain_part.update_flag == 1)
++	if (pfs_file->file_meta_data.plain_part.update_flag == 1)
+ 	{// file was in the middle of an update, must do a recovery
+-		if (file_recovery(filename) == false)
++		if (file_recovery(pfs_file, filename) == false)
+ 		{// override internal error
+-			last_error = SGX_ERROR_FILE_RECOVERY_NEEDED;
++			pfs_file->last_error = SGX_ERROR_FILE_RECOVERY_NEEDED;
+ 			return false;
+ 		}
+ 
+-		if (file_meta_data.plain_part.update_flag == 1) // recovery failed, flag is still set!
++		if (pfs_file->file_meta_data.plain_part.update_flag == 1) // recovery failed, flag is still set!
+ 		{// recovery didn't clear the flag
+-			last_error = SGX_ERROR_FILE_RECOVERY_NEEDED;
++			pfs_file->last_error = SGX_ERROR_FILE_RECOVERY_NEEDED;
+ 			return false;
+ 		}
+ 
+ 		// re-check after recovery
+-		if (file_meta_data.plain_part.major_version != SGX_FILE_MAJOR_VERSION)
++		if (pfs_file->file_meta_data.plain_part.major_version != SGX_FILE_MAJOR_VERSION)
+ 		{
+-			last_error = ENOTSUP;
++			pfs_file->last_error = ENOTSUP;
+ 			return false;
+ 		}
+ 	}
+ 
+-	if (file_meta_data.plain_part.use_user_kdk_key != use_user_kdk_key)
++	if (pfs_file->file_meta_data.plain_part.use_user_kdk_key != pfs_file->use_user_kdk_key)
+ 	{
+-		last_error = EINVAL;
++		pfs_file->last_error = EINVAL;
+ 		return false;
+ 	}
+ 
+-	if (restore_current_meta_data_key(import_key) == false)
++	if (restore_current_meta_data_key(pfs_file, import_key) == false)
+ 		return false;
+ 
+ 	// decrypt the encrypted part of the meta-data
+-	status = sgx_rijndael128GCM_decrypt(&cur_key, 
+-										(const uint8_t*)file_meta_data.encrypted_part, sizeof(meta_data_encrypted_blob_t), (uint8_t*)&encrypted_part_plain,
+-										empty_iv, SGX_AESGCM_IV_SIZE,
++	status = sgx_rijndael128GCM_decrypt(&pfs_file->cur_key, 
++										(const uint8_t*)pfs_file->file_meta_data.encrypted_part, sizeof(meta_data_encrypted_blob_t), (uint8_t*)&pfs_file->encrypted_part_plain,
++										pfs_file->empty_iv, SGX_AESGCM_IV_SIZE,
+ 										NULL, 0,
+-										&file_meta_data.plain_part.meta_data_gmac);
++										&pfs_file->file_meta_data.plain_part.meta_data_gmac);
+         DBG_PRINT("after call to sgx_gcm_dec, status=%d\n", (int)status);
+ 
+ 	if (status != SGX_SUCCESS)
+ 	{
+-		last_error = status;
++		pfs_file->last_error = status;
+ 		return false;
+ 	}
+ 
+-	if (strncmp(clean_filename, encrypted_part_plain.clean_filename, FILENAME_MAX_LEN) != 0)
++	if (strncmp(clean_filename, pfs_file->encrypted_part_plain.clean_filename, FILENAME_MAX_LEN) != 0)
+ 	{
+-		last_error = SGX_ERROR_FILE_NAME_MISMATCH;
++		pfs_file->last_error = SGX_ERROR_FILE_NAME_MISMATCH;
+ 		return false;
+ 	}
+ 
+@@ -513,149 +592,183 @@ bool protected_fs_file::init_existing_file(const char* filename, const char* cle
+ 		encrypted_part_plain.mc_value = 0; // do this anyway for release...
+ 	}
+ */
+-	if (encrypted_part_plain.size > MD_USER_DATA_SIZE)
++	if (pfs_file->encrypted_part_plain.size > MD_USER_DATA_SIZE)
+ 	{
+ 		// read the root node of the mht
+-		status = (sgx_status_t)u_sgxprotectedfs_fread_node_wrap(&result32, file, 1, root_mht.encrypted.cipher, NODE_SIZE);
++		status = (sgx_status_t)u_sgxprotectedfs_fread_node_wrap(&result32, pfs_file->file, 1, pfs_file->root_mht.encrypted.cipher, NODE_SIZE);
+ 		if (status != SGX_SUCCESS || result32 != 0)
+ 		{
+-			last_error = (status != SGX_SUCCESS) ? status : 
++			pfs_file->last_error = (status != SGX_SUCCESS) ? status : 
+ 						 (result32 != -1) ? result32 : EIO;
+ 			return false;
+ 		}
+ 
+ 		// this also verifies the root mht gmac against the gmac in the meta-data encrypted part
+-		status = sgx_rijndael128GCM_decrypt(&encrypted_part_plain.mht_key, 
+-											root_mht.encrypted.cipher, NODE_SIZE, (uint8_t*)&root_mht.plain, 
+-											empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &encrypted_part_plain.mht_gmac);
++		status = sgx_rijndael128GCM_decrypt(&pfs_file->encrypted_part_plain.mht_key, 
++											pfs_file->root_mht.encrypted.cipher, NODE_SIZE, (uint8_t*)&pfs_file->root_mht.plain, 
++											pfs_file->empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &pfs_file->encrypted_part_plain.mht_gmac);
+ 
+         	DBG_PRINT("after call to sgx_gcm_dec, status=%d\n", (int)status);
+ 
+ 		if (status != SGX_SUCCESS)
+ 		{
+-			last_error = status;
++			pfs_file->last_error = status;
+ 			return false;
+ 		}
+ 
+-		root_mht.new_node = false;
++		pfs_file->root_mht.new_node = false;
+ 	}
+ 
+ 	return true;
+ }
+ 
+ 
+-bool protected_fs_file::init_new_file(const char* clean_filename)
++static bool init_new_file(protected_fs_file_t* pfs_file, const char* clean_filename)
+ {
+-	file_meta_data.plain_part.file_id = SGX_FILE_ID;
+-	file_meta_data.plain_part.major_version = SGX_FILE_MAJOR_VERSION;
+-	file_meta_data.plain_part.minor_version = SGX_FILE_MINOR_VERSION;
+ 
+-	file_meta_data.plain_part.use_user_kdk_key = use_user_kdk_key;
++    if (!pfs_file)
++        return false;
++        
++	pfs_file->file_meta_data.plain_part.file_id = SGX_FILE_ID;
++	pfs_file->file_meta_data.plain_part.major_version = SGX_FILE_MAJOR_VERSION;
++	pfs_file->file_meta_data.plain_part.minor_version = SGX_FILE_MINOR_VERSION;
++
++	pfs_file->file_meta_data.plain_part.use_user_kdk_key = pfs_file->use_user_kdk_key;
+ 
+-	strncpy(encrypted_part_plain.clean_filename, clean_filename, FILENAME_MAX_LEN);
++	strncpy(pfs_file->encrypted_part_plain.clean_filename, clean_filename, FILENAME_MAX_LEN);
+ 	
+-	need_writing = true;
++	pfs_file->need_writing = true;
+ 
+ 	return true;
+ }
+-	
+-protected_fs_file::~protected_fs_file()
++
++void free_protected_fs_file(protected_fs_file_t *pfs_file)
+ {
+ 	void* data;
+ 	
+-	while ((data = cache.get_last()) != NULL)
++	DBG_PRINT("%s:%d:\n", __func__, __LINE__);
++
++	if (!pfs_file)
++	    return;
++
++#ifdef DEBUG_CODE
++	int removed = 0;
++	int cache_size = 0;
++	cache_size = size(&pfs_file->cache);
++    DBG_PRINT("%s: lru-cache-size=%u\n", __func__, cache_size);
++#endif
++	while ((data = get_last(&pfs_file->cache)) != NULL)
+ 	{
+-		if (((file_data_node_t*)data)->type == FILE_DATA_NODE_TYPE) // type is in the same offset in both node types, need to scrub the plaintext
++	    DBG_PRINT("%s:%d:about to delete NODE_TYPE->%s, NODE_PTR->%p\n",
++                __func__, __LINE__,
++                ((((file_data_node_t*)data)->type == FILE_DATA_NODE_TYPE)?"DATA_NODE":"MHT_NODE"),
++                data);
++	    if (((file_data_node_t*)data)->type == FILE_DATA_NODE_TYPE) // type is in the same offset in both node types, need to scrub the plaintext
+ 		{
+ 			file_data_node_t* file_data_node = (file_data_node_t*)data;
+ 			memset_s(&file_data_node->plain, sizeof(data_node_t), 0, sizeof(data_node_t));
+-			delete file_data_node;
++			free(file_data_node);
+ 		}
+ 		else
+ 		{
+ 			file_mht_node_t* file_mht_node = (file_mht_node_t*)data;
+ 			memset_s(&file_mht_node->plain, sizeof(mht_node_t), 0, sizeof(mht_node_t));
+-			delete file_mht_node;
++			free(file_mht_node);
+ 		}
+-		cache.remove_last();
++		remove_last(&pfs_file->cache);
++#ifdef DEBUG_CODE
++     ++removed;
++#endif
+ 	}
++#ifdef DEBUG_CODE
++    DBG_PRINT("removed =%d, entries from lru-cache, current-cache-size=%d\n",
++            removed, size(&pfs_file->cache));
++#endif
++
++   //TODO: Logic above, should remove all entries in cache, is there a need
++    //to call destroy_lru_cache, unless there is some other cleanup needed.
++   destroy_lru_cache(&pfs_file->cache);
+ 
+ 	// scrub the last encryption key and the session key
+-	memset_s(&cur_key, sizeof(sgx_aes_gcm_128bit_key_t), 0, sizeof(sgx_aes_gcm_128bit_key_t));
+-	memset_s(&session_master_key, sizeof(sgx_aes_gcm_128bit_key_t), 0, sizeof(sgx_aes_gcm_128bit_key_t));
++	memset_s(&pfs_file->cur_key, sizeof(sgx_aes_gcm_128bit_key_t), 0, sizeof(sgx_aes_gcm_128bit_key_t));
++	memset_s(&pfs_file->session_master_key, sizeof(sgx_aes_gcm_128bit_key_t), 0, sizeof(sgx_aes_gcm_128bit_key_t));
+ 	
+ 	// scrub first 3KB of user data and the gmac_key
+-	memset_s(&encrypted_part_plain, sizeof(meta_data_encrypted_t), 0, sizeof(meta_data_encrypted_t));
++	memset_s(&pfs_file->encrypted_part_plain, sizeof(meta_data_encrypted_t), 0, sizeof(meta_data_encrypted_t));
++
++	sgx_thread_mutex_destroy(&pfs_file->mutex);
+ 
+-	sgx_thread_mutex_destroy(&mutex);
+ }
+ 
+ 
+-bool protected_fs_file::pre_close(sgx_key_128bit_t* key, bool import)
++bool pfs_file_pre_close(protected_fs_file_t *pfs_file, sgx_key_128bit_t* key, bool import)
+ {
+ 	int32_t result32 = 0;
+ 	bool retval = true;
+ 	sgx_status_t status = SGX_SUCCESS;
+ 
+-	sgx_thread_mutex_lock(&mutex);
++    if (!pfs_file)
++        return false;
++        
++	sgx_thread_mutex_lock(&pfs_file->mutex);
+ 
+ 	if (import == true)
+ 	{
+-		if (use_user_kdk_key == 1) // import file is only needed for auto-key
++		if (pfs_file->use_user_kdk_key == 1) // import file is only needed for auto-key
+ 			retval = false;
+ 		else
+-			need_writing = true; // will re-encrypt the neta-data node with local key
++			pfs_file->need_writing = true; // will re-encrypt the neta-data node with local key
+ 	}
+ 
+-	if (file_status != SGX_FILE_STATUS_OK)
++	if (pfs_file->file_status != SGX_FILE_STATUS_OK)
+ 	{
+-		sgx_thread_mutex_unlock(&mutex);
+-		clear_error(); // last attempt to fix it
+-		sgx_thread_mutex_lock(&mutex);
++		sgx_thread_mutex_unlock(&pfs_file->mutex);
++		pfs_file_clear_error(pfs_file); // last attempt to fix it
++		sgx_thread_mutex_lock(&pfs_file->mutex);
+ 	}
+ 	else // file_status == SGX_FILE_STATUS_OK
+ 	{
+-		internal_flush(/*false,*/ true);
++		internal_flush(pfs_file, /*false,*/ true);
+ 	}
+ 
+-	if (file_status != SGX_FILE_STATUS_OK)
++	if (pfs_file->file_status != SGX_FILE_STATUS_OK)
+ 		retval = false;
+ 
+-	if (file != NULL)
++	if (pfs_file->file != NULL)
+ 	{
+-		status = (sgx_status_t)u_sgxprotectedfs_fclose_wrap(&result32, file);
++		status = (sgx_status_t)u_sgxprotectedfs_fclose_wrap(&result32, pfs_file->file);
+ 		if (status != SGX_SUCCESS || result32 != 0)
+ 		{
+-			last_error = (status != SGX_SUCCESS) ? status : 
++			pfs_file->last_error = (status != SGX_SUCCESS) ? status : 
+ 						 (result32 != -1) ? result32 : SGX_ERROR_FILE_CLOSE_FAILED;
+ 			retval = false;
+ 		}
+ 
+-		file = NULL;
++		pfs_file->file = NULL;
+ 	}
+ 
+-	if (file_status == SGX_FILE_STATUS_OK && 
+-		last_error == SGX_SUCCESS) // else...maybe something bad happened and the recovery file will be needed
+-		erase_recovery_file();
++	if (pfs_file->file_status == SGX_FILE_STATUS_OK && 
++		pfs_file->last_error == SGX_SUCCESS) // else...maybe something bad happened and the recovery file will be needed
++		erase_recovery_file(pfs_file);
+ 
+ 	if (key != NULL)
+ 	{
+-		if (use_user_kdk_key == 1) // export key is only used for auto-key
++		if (pfs_file->use_user_kdk_key == 1) // export key is only used for auto-key
+ 		{
+ 			retval = false;
+ 		}
+ 		else
+ 		{
+-			if (restore_current_meta_data_key(NULL) == true)
+-				memcpy(key, cur_key, sizeof(sgx_key_128bit_t));
++			if (restore_current_meta_data_key(pfs_file, NULL) == true)
++				memcpy(key, pfs_file->cur_key, sizeof(sgx_key_128bit_t));
+ 			else
+ 				retval = false;
+ 		}
+ 	}
+ 
+-	file_status = SGX_FILE_STATUS_CLOSED;
++	pfs_file->file_status = SGX_FILE_STATUS_CLOSED;
+ 
+-	sgx_thread_mutex_unlock(&mutex);
++	sgx_thread_mutex_unlock(&pfs_file->mutex);
+ 
+ 	return retval;
+ }
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/file_other.cpp b/sdk/protected_fs/sgx_tprotected_fs/file_other.cpp
+index 7d06285..a61503c 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/file_other.cpp
++++ b/sdk/protected_fs/sgx_tprotected_fs/file_other.cpp
+@@ -40,18 +40,18 @@
+ 
+ // this function returns 0 only if the specified file existed and it was actually deleted
+ // before we do that, we try to see if the file contained a monotonic counter, and if it did, we delete it from the system
+-int32_t protected_fs_file::remove(const char* filename)
++int32_t pfs_file_remove(const char* filename)
+ {
+ 	sgx_status_t status;
+ 	int32_t result32 = 0;
+ 
++	if (filename == NULL)
++		return 1;
++
+ /*
+ 	void* file = NULL;
+ 	int64_t real_file_size = 0;
+ 
+-	if (filename == NULL)
+-		return 1;
+-
+ 	meta_data_node_t* file_meta_data = NULL;
+ 	meta_data_encrypted_t* encrypted_part_plain = NULL;
+ 
+@@ -162,38 +162,44 @@ int32_t protected_fs_file::remove(const char* filename)
+ 	return 0;
+ }
+ 
+-
+-int64_t protected_fs_file::tell()
++//Note: return values of these functions, match with standard api, like ftell or tell.
++int64_t pfs_file_tell(protected_fs_file_t *pfs_file)
+ {
+ 	int64_t result;
+ 
+-	sgx_thread_mutex_lock(&mutex);
++    if (!pfs_file)
++        return -1;    
+ 
+-	if (file_status != SGX_FILE_STATUS_OK)
++	sgx_thread_mutex_lock(&pfs_file->mutex);
++
++	if (pfs_file->file_status != SGX_FILE_STATUS_OK)
+ 	{
+ 		errno = EPERM;
+-		last_error = SGX_ERROR_FILE_BAD_STATUS;
+-		sgx_thread_mutex_unlock(&mutex);
++		pfs_file->last_error = SGX_ERROR_FILE_BAD_STATUS;
++		sgx_thread_mutex_unlock(&pfs_file->mutex);
+ 		return -1;
+ 	}
+ 
+-	result = offset;
++	result = pfs_file->offset;
+ 
+-	sgx_thread_mutex_unlock(&mutex);
++	sgx_thread_mutex_unlock(&pfs_file->mutex);
+ 
+ 	return result;
+ }
+ 
+ 
+ // we don't support sparse files, fseek beyond the current file size will fail
+-int protected_fs_file::seek(int64_t new_offset, int origin)
++int pfs_file_seek(protected_fs_file_t *pfs_file, int64_t new_offset, int origin)
+ {
+-	sgx_thread_mutex_lock(&mutex);
++    if (!pfs_file)
++        return -1;    
++
++	sgx_thread_mutex_lock(&pfs_file->mutex);
+ 
+-	if (file_status != SGX_FILE_STATUS_OK)
++	if (pfs_file->file_status != SGX_FILE_STATUS_OK)
+ 	{
+-		last_error = SGX_ERROR_FILE_BAD_STATUS;
+-		sgx_thread_mutex_unlock(&mutex);
++		pfs_file->last_error = SGX_ERROR_FILE_BAD_STATUS;
++		sgx_thread_mutex_unlock(&pfs_file->mutex);
+ 		return -1;
+ 	}
+ 
+@@ -209,25 +215,25 @@ int protected_fs_file::seek(int64_t new_offset, int origin)
+ 	switch (origin)
+ 	{
+ 	case SEEK_SET:
+-		if (new_offset >= 0 && new_offset <= encrypted_part_plain.size)
++		if (new_offset >= 0 && new_offset <= pfs_file->encrypted_part_plain.size)
+ 		{
+-			offset = new_offset;
++			pfs_file->offset = new_offset;
+ 			result = 0;
+ 		}
+ 		break;
+ 
+ 	case SEEK_CUR:
+-		if ((offset + new_offset) >= 0 && (offset + new_offset) <= encrypted_part_plain.size)
++		if ((pfs_file->offset + new_offset) >= 0 && (pfs_file->offset + new_offset) <= pfs_file->encrypted_part_plain.size)
+ 		{
+-			offset += new_offset;
++			pfs_file->offset += new_offset;
+ 			result = 0;
+ 		}
+ 		break;
+ 
+ 	case SEEK_END:
+-		if (new_offset <= 0 && new_offset >= (0 - encrypted_part_plain.size))
++		if (new_offset <= 0 && new_offset >= (0 - pfs_file->encrypted_part_plain.size))
+ 		{
+-			offset = encrypted_part_plain.size + new_offset;
++			pfs_file->offset = pfs_file->encrypted_part_plain.size + new_offset;
+ 			result = 0;
+ 		}
+ 		break;
+@@ -237,65 +243,74 @@ int protected_fs_file::seek(int64_t new_offset, int origin)
+ 	}
+ 
+ 	if (result == 0)
+-		end_of_file = false;
++	    pfs_file->end_of_file = false;
+ 	else
+-		last_error = EINVAL;
++	    pfs_file->last_error = EINVAL;
+ 
+-	sgx_thread_mutex_unlock(&mutex);
++	sgx_thread_mutex_unlock(&pfs_file->mutex);
+ 
+ 	return result;
+ }
+ 
+ 
+-uint32_t protected_fs_file::get_error()
++uint32_t pfs_file_get_error(protected_fs_file_t *pfs_file)
+ {
+ 	uint32_t result = SGX_SUCCESS;
+ 
+-	sgx_thread_mutex_lock(&mutex);
++    if (!pfs_file)
++        return SGX_ERROR_INVALID_PARAMETER;
++        
++	sgx_thread_mutex_lock(&pfs_file->mutex);
+ 
+-	if (last_error != SGX_SUCCESS)
+-		result = last_error;
+-	else if (file_status != SGX_FILE_STATUS_OK)
++	if (pfs_file->last_error != SGX_SUCCESS)
++		result = pfs_file->last_error;
++	else if (pfs_file->file_status != SGX_FILE_STATUS_OK)
+ 		result = SGX_ERROR_FILE_BAD_STATUS;
+ 
+-	sgx_thread_mutex_unlock(&mutex);
++	sgx_thread_mutex_unlock(&pfs_file->mutex);
+ 
+ 	return result;
+ }
+ 
+ 
+-bool protected_fs_file::get_eof()
++bool pfs_file_get_eof(protected_fs_file_t *pfs_file)
+ {
+-	return end_of_file;
++    if (!pfs_file)
++        return false;
++
++	return pfs_file->end_of_file;
+ }
+ 
+ 
+-void protected_fs_file::clear_error()
++void pfs_file_clear_error(protected_fs_file_t *pfs_file)
+ {
+-	sgx_thread_mutex_lock(&mutex);
++    if (!pfs_file)
++        return;
++
++	sgx_thread_mutex_lock(&pfs_file->mutex);
+ 
+-	if (file_status == SGX_FILE_STATUS_NOT_INITIALIZED ||
+-		file_status == SGX_FILE_STATUS_CLOSED ||
+-		file_status == SGX_FILE_STATUS_CRYPTO_ERROR ||
+-		file_status == SGX_FILE_STATUS_CORRUPTED ||
+-		file_status == SGX_FILE_STATUS_MEMORY_CORRUPTED) // can't fix these...
++	if (pfs_file->file_status == SGX_FILE_STATUS_NOT_INITIALIZED ||
++		pfs_file->file_status == SGX_FILE_STATUS_CLOSED ||
++		pfs_file->file_status == SGX_FILE_STATUS_CRYPTO_ERROR ||
++		pfs_file->file_status == SGX_FILE_STATUS_CORRUPTED ||
++		pfs_file->file_status == SGX_FILE_STATUS_MEMORY_CORRUPTED) // can't fix these...
+ 	{
+-		sgx_thread_mutex_unlock(&mutex);
++		sgx_thread_mutex_unlock(&pfs_file->mutex);
+ 		return;
+ 	}
+ 
+-	if (file_status == SGX_FILE_STATUS_FLUSH_ERROR)
++	if (pfs_file->file_status == SGX_FILE_STATUS_FLUSH_ERROR)
+ 	{
+-		if (internal_flush(/*false,*/ true) == true)
+-			file_status = SGX_FILE_STATUS_OK;
++		if (internal_flush(pfs_file, /*false,*/ true) == true)
++			pfs_file->file_status = SGX_FILE_STATUS_OK;
+ 	}
+ 
+-	if (file_status == SGX_FILE_STATUS_WRITE_TO_DISK_FAILED)
++	if (pfs_file->file_status == SGX_FILE_STATUS_WRITE_TO_DISK_FAILED)
+ 	{
+-		if (write_all_changes_to_disk(true) == true)
++		if (write_all_changes_to_disk(pfs_file, true) == true)
+ 		{
+-			need_writing = false;
+-			file_status = SGX_FILE_STATUS_OK;
++		    pfs_file->need_writing = false;
++			pfs_file->file_status = SGX_FILE_STATUS_OK;
+ 		}
+ 	}
+ 
+@@ -326,52 +341,55 @@ void protected_fs_file::clear_error()
+ 	}
+ */
+ 	
+-	if (file_status == SGX_FILE_STATUS_OK)
++	if (pfs_file->file_status == SGX_FILE_STATUS_OK)
+ 	{
+-		last_error = SGX_SUCCESS;
+-		end_of_file = false;
++	    pfs_file->last_error = SGX_SUCCESS;
++	    pfs_file->end_of_file = false;
+ 	}
+-	sgx_thread_mutex_unlock(&mutex);
++	sgx_thread_mutex_unlock(&pfs_file->mutex);
+ }
+ 
+ 
+ // clears the cache with all the plain data that was in it
+ // doesn't clear the meta-data and first node, which are part of the 'main' structure
+-int32_t protected_fs_file::clear_cache()
++int32_t pfs_file_clear_cache(protected_fs_file_t *pfs_file)
+ {
+-	sgx_thread_mutex_lock(&mutex);
++    if (!pfs_file)
++        return -1;
+ 
+-	if (file_status != SGX_FILE_STATUS_OK)
++    sgx_thread_mutex_lock(&pfs_file->mutex);
++
++	if (pfs_file->file_status != SGX_FILE_STATUS_OK)
+ 	{
+-		sgx_thread_mutex_unlock(&mutex);
+-		clear_error(); // attempt to fix the file, will also flush it
+-		sgx_thread_mutex_lock(&mutex);
++		sgx_thread_mutex_unlock(&pfs_file->mutex);
++		pfs_file_clear_error(pfs_file); // attempt to fix the file, will also flush it
++		sgx_thread_mutex_lock(&pfs_file->mutex);
+ 	}
+ 	else // file_status == SGX_FILE_STATUS_OK
+ 	{
+-		internal_flush(/*false,*/ true);
++		internal_flush(pfs_file, /*false,*/ true);
+ 	}
+ 
+-	if (file_status != SGX_FILE_STATUS_OK) // clearing the cache might lead to losing un-saved data
++	if (pfs_file->file_status != SGX_FILE_STATUS_OK) // clearing the cache might lead to losing un-saved data
+ 	{
+-		sgx_thread_mutex_unlock(&mutex);
++		sgx_thread_mutex_unlock(&pfs_file->mutex);
+ 		return 1;
+ 	}
+ 
+-	while (cache.size() > 0)
++	while (size(&pfs_file->cache) > 0)
+ 	{
+-		void* data = cache.get_last();
++		void* data = get_last(&pfs_file->cache);
+ 
+ 		assert(data != NULL);
+ 		assert(((file_data_node_t*)data)->need_writing == false); // need_writing is in the same offset in both node types
+ 		// for production - 
+ 		if (data == NULL || ((file_data_node_t*)data)->need_writing == true)
+ 		{
+-			sgx_thread_mutex_unlock(&mutex);
++			sgx_thread_mutex_unlock(&pfs_file->mutex);
+ 			return 1;
+ 		}
+ 		
+-		cache.remove_last();
++		remove_last(&pfs_file->cache);
+ 
+ 		// before deleting the memory, need to scrub the plain secrets
+ 		if (((file_data_node_t*)data)->type == FILE_DATA_NODE_TYPE) // type is in the same offset in both node types
+@@ -388,8 +406,7 @@ int32_t protected_fs_file::clear_cache()
+ 		}
+ 	}
+ 
+-	sgx_thread_mutex_unlock(&mutex);
++	sgx_thread_mutex_unlock(&pfs_file->mutex);
+ 
+ 	return 0;
+ }
+-
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/file_read_write.cpp b/sdk/protected_fs/sgx_tprotected_fs/file_read_write.cpp
+index 5198d62..acee720 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/file_read_write.cpp
++++ b/sdk/protected_fs/sgx_tprotected_fs/file_read_write.cpp
+@@ -33,18 +33,26 @@
+ #include "protected_fs_file.h"
+ 
+ #include "sgx_proxy_sdk_tlibc.h"
+-//#include <sgx_trts.h>
+ 
+-size_t protected_fs_file::write(const void* ptr, size_t size, size_t count)
++static void get_node_numbers(uint64_t offset, uint64_t* mht_node_number, uint64_t* data_node_number, 
++					 uint64_t* physical_mht_node_number, uint64_t* physical_data_node_number);
++static file_data_node_t* get_data_node(protected_fs_file_t *pfs_file);
++static file_data_node_t* append_data_node(protected_fs_file_t *pfs_file);
++static file_data_node_t* read_data_node(protected_fs_file_t *pfs_file);
++static file_mht_node_t* get_mht_node(protected_fs_file_t *pfs_file);
++static file_mht_node_t* append_mht_node(protected_fs_file_t *pfs_file, uint64_t mht_node_number);
++static file_mht_node_t* read_mht_node(protected_fs_file_t *pfs_file, uint64_t mht_node_number);
++
++size_t pfs_file_write(protected_fs_file_t *pfs_file, const void* ptr, size_t size, size_t count)
+ {
+-	if (ptr == NULL || size == 0 || count == 0)
++	if (ptr == NULL || size == 0 || count == 0 || !pfs_file)
+ 		return 0;
+ 
+-	int32_t result32 = sgx_thread_mutex_lock(&mutex);
++	int32_t result32 = sgx_thread_mutex_lock(&pfs_file->mutex);
+ 	if (result32 != 0)
+ 	{
+-		last_error = result32;
+-		file_status = SGX_FILE_STATUS_MEMORY_CORRUPTED;
++		pfs_file->last_error = result32;
++		pfs_file->file_status = SGX_FILE_STATUS_MEMORY_CORRUPTED;
+ 		return 0;
+ 	}
+ 
+@@ -54,15 +62,15 @@ size_t protected_fs_file::write(const void* ptr, size_t size, size_t count)
+ #if defined(_WIN64) || defined(__x86_64__)
+ 	if (size > UINT32_MAX || count > UINT32_MAX)
+ 	{
+-		last_error = EINVAL;
+-		sgx_thread_mutex_unlock(&mutex);
++		pfs_file->last_error = EINVAL;
++		sgx_thread_mutex_unlock(&pfs_file->mutex);
+ 		return 0;
+ 	}
+ #else
+ 	if (((uint64_t)((uint64_t)size * (uint64_t)count)) != (uint64_t)data_left_to_write)
+ 	{
+-		last_error = EINVAL;
+-		sgx_thread_mutex_unlock(&mutex);
++		pfs_file->last_error = EINVAL;
++		sgx_thread_mutex_unlock(&pfs_file->mutex);
+ 		return 0;
+ 	}
+ #endif
+@@ -74,78 +82,78 @@ size_t protected_fs_file::write(const void* ptr, size_t size, size_t count)
+ 		return 0;
+ 	}
+ */
+-	if (file_status != SGX_FILE_STATUS_OK)
++	if (pfs_file->file_status != SGX_FILE_STATUS_OK)
+ 	{
+-		last_error = SGX_ERROR_FILE_BAD_STATUS;
+-		sgx_thread_mutex_unlock(&mutex);
++		pfs_file->last_error = SGX_ERROR_FILE_BAD_STATUS;
++		sgx_thread_mutex_unlock(&pfs_file->mutex);
+ 		return 0;
+ 	}
+ 
+-	if (open_mode.append == 0 && open_mode.update == 0 && open_mode.write == 0)
++	if (pfs_file->open_mode.append == 0 && pfs_file->open_mode.update == 0 && pfs_file->open_mode.write == 0)
+ 	{
+-		last_error = EACCES;
+-		sgx_thread_mutex_unlock(&mutex);
++		pfs_file->last_error = EACCES;
++		sgx_thread_mutex_unlock(&pfs_file->mutex);
+ 		return 0;
+ 	}
+ 
+-	if (open_mode.append == 1)
+-		offset = encrypted_part_plain.size; // add at the end of the file
++	if (pfs_file->open_mode.append == 1)
++		pfs_file->offset = pfs_file->encrypted_part_plain.size; // add at the end of the file
+ 
+ 	const unsigned char* data_to_write = (const unsigned char*)ptr;
+ 
+ 	// the first block of user data is written in the meta-data encrypted part
+-	if (offset < MD_USER_DATA_SIZE)
++	if (pfs_file->offset < MD_USER_DATA_SIZE)
+ 	{
+-		size_t empty_place_left_in_md = MD_USER_DATA_SIZE - (size_t)offset; // offset is smaller than MD_USER_DATA_SIZE
++		size_t empty_place_left_in_md = MD_USER_DATA_SIZE - (size_t)pfs_file->offset; // offset is smaller than MD_USER_DATA_SIZE
+ 		if (data_left_to_write <= empty_place_left_in_md)
+ 		{
+-			memcpy(&encrypted_part_plain.data[offset], data_to_write, data_left_to_write);
+-			offset += data_left_to_write;
++			memcpy(&pfs_file->encrypted_part_plain.data[pfs_file->offset], data_to_write, data_left_to_write);
++			pfs_file->offset += data_left_to_write;
+ 			data_to_write += data_left_to_write; // not needed, to prevent future errors
+ 			data_left_to_write = 0;
+ 		}
+ 		else
+ 		{
+-			memcpy(&encrypted_part_plain.data[offset], data_to_write, empty_place_left_in_md);
+-			offset += empty_place_left_in_md;
++			memcpy(&pfs_file->encrypted_part_plain.data[pfs_file->offset], data_to_write, empty_place_left_in_md);
++			pfs_file->offset += empty_place_left_in_md;
+ 			data_to_write += empty_place_left_in_md;
+ 			data_left_to_write -= empty_place_left_in_md;
+ 		}
+ 		
+-		if (offset > encrypted_part_plain.size)
+-			encrypted_part_plain.size = offset; // file grew, update the new file size
++		if (pfs_file->offset > pfs_file->encrypted_part_plain.size)
++			pfs_file->encrypted_part_plain.size = pfs_file->offset; // file grew, update the new file size
+ 
+-		need_writing = true;
++		pfs_file->need_writing = true;
+ 	}
+ 
+ 	while (data_left_to_write > 0)
+ 	{
+ 		file_data_node_t* file_data_node = NULL;
+-		file_data_node = get_data_node(); // return the data node of the current offset, will read it from disk or create new one if needed (and also the mht node if needed)
++		file_data_node = get_data_node(pfs_file); // return the data node of the current offset, will read it from disk or create new one if needed (and also the mht node if needed)
+ 		if (file_data_node == NULL)
+ 			break;
+ 
+-		size_t offset_in_node = (size_t)((offset - MD_USER_DATA_SIZE) % NODE_SIZE);
++		size_t offset_in_node = (size_t)((pfs_file->offset - MD_USER_DATA_SIZE) % NODE_SIZE);
+ 		size_t empty_place_left_in_node = NODE_SIZE - offset_in_node;
+ 		
+ 		if (data_left_to_write <= empty_place_left_in_node)
+ 		{ // this will be the last write
+ 			memcpy(&file_data_node->plain.data[offset_in_node], data_to_write, data_left_to_write);
+-			offset += data_left_to_write;
++			pfs_file->offset += data_left_to_write;
+ 			data_to_write += data_left_to_write; // not needed, to prevent future errors
+ 			data_left_to_write = 0;
+ 		}
+ 		else
+ 		{
+ 			memcpy(&file_data_node->plain.data[offset_in_node], data_to_write, empty_place_left_in_node);
+-			offset += empty_place_left_in_node;
++			pfs_file->offset += empty_place_left_in_node;
+ 			data_to_write += empty_place_left_in_node;
+ 			data_left_to_write -= empty_place_left_in_node;
+ 
+ 		}
+ 
+-		if (offset > encrypted_part_plain.size)
+-			encrypted_part_plain.size = offset; // file grew, update the new file size
++		if (pfs_file->offset > pfs_file->encrypted_part_plain.size)
++			pfs_file->encrypted_part_plain.size = pfs_file->offset; // file grew, update the new file size
+ 
+ 		if (file_data_node->need_writing == false)
+ 		{
+@@ -156,28 +164,28 @@ size_t protected_fs_file::write(const void* ptr, size_t size, size_t count)
+ 				file_mht_node->need_writing = true;
+ 				file_mht_node = file_mht_node->parent;
+ 			}
+-			root_mht.need_writing = true;
+-			need_writing = true;
++			pfs_file->root_mht.need_writing = true;
++			pfs_file->need_writing = true;
+ 		}
+ 	}
+ 
+-	sgx_thread_mutex_unlock(&mutex);
++	sgx_thread_mutex_unlock(&pfs_file->mutex);
+ 
+ 	size_t ret_count = ((size * count) - data_left_to_write) / size;
+ 	return ret_count;
+ }
+ 
+ 
+-size_t protected_fs_file::read(void* ptr, size_t size, size_t count)
++size_t pfs_file_read(protected_fs_file_t *pfs_file, void* ptr, size_t size, size_t count)
+ {
+-	if (ptr == NULL || size == 0 || count == 0)
++	if (ptr == NULL || size == 0 || count == 0 || !pfs_file)
+ 		return 0;
+ 
+-	int32_t result32 = sgx_thread_mutex_lock(&mutex);
++	int32_t result32 = sgx_thread_mutex_lock(&pfs_file->mutex);
+ 	if (result32 != 0)
+ 	{
+-		last_error = result32;
+-		file_status = SGX_FILE_STATUS_MEMORY_CORRUPTED;
++		pfs_file->last_error = result32;
++		pfs_file->file_status = SGX_FILE_STATUS_MEMORY_CORRUPTED;
+ 		return 0;
+ 	}
+ 
+@@ -187,15 +195,15 @@ size_t protected_fs_file::read(void* ptr, size_t size, size_t count)
+ #if defined(_WIN64) || defined(__x86_64__)
+ 	if (size > UINT32_MAX || count > UINT32_MAX)
+ 	{
+-		last_error = EINVAL;
+-		sgx_thread_mutex_unlock(&mutex);
++		pfs_file->last_error = EINVAL;
++		sgx_thread_mutex_unlock(&pfs_file->mutex);
+ 		return 0;
+ 	}
+ #else
+ 	if (((uint64_t)((uint64_t)size * (uint64_t)count)) != (uint64_t)data_left_to_read)
+ 	{
+-		last_error = EINVAL;
+-		sgx_thread_mutex_unlock(&mutex);
++		pfs_file->last_error = EINVAL;
++		sgx_thread_mutex_unlock(&pfs_file->mutex);
+ 		return 0;
+ 	}
+ #endif
+@@ -208,57 +216,57 @@ size_t protected_fs_file::read(void* ptr, size_t size, size_t count)
+ 		return 0;
+ 	}
+ */
+-	if (file_status != SGX_FILE_STATUS_OK)
++	if (pfs_file->file_status != SGX_FILE_STATUS_OK)
+ 	{
+-		last_error = SGX_ERROR_FILE_BAD_STATUS;
+-		sgx_thread_mutex_unlock(&mutex);
++		pfs_file->last_error = SGX_ERROR_FILE_BAD_STATUS;
++		sgx_thread_mutex_unlock(&pfs_file->mutex);
+ 		return 0;
+ 	}
+ 
+-	if (open_mode.read == 0 && open_mode.update == 0)
++	if (pfs_file->open_mode.read == 0 && pfs_file->open_mode.update == 0)
+ 	{
+-		last_error = EACCES;
+-		sgx_thread_mutex_unlock(&mutex);
++		pfs_file->last_error = EACCES;
++		sgx_thread_mutex_unlock(&pfs_file->mutex);
+ 		return 0;
+ 	}
+ 
+-	if (end_of_file == true)
++	if (pfs_file->end_of_file == true)
+ 	{// not an error
+-		sgx_thread_mutex_unlock(&mutex);
++		sgx_thread_mutex_unlock(&pfs_file->mutex);
+ 		return 0;
+ 	}
+ 
+ 	// this check is not really needed, can go on with the code and it will do nothing until the end, but it's more 'right' to check it here
+-	if (offset == encrypted_part_plain.size)
++	if (pfs_file->offset == pfs_file->encrypted_part_plain.size)
+ 	{
+-		end_of_file = true;
+-		sgx_thread_mutex_unlock(&mutex);
++		pfs_file->end_of_file = true;
++		sgx_thread_mutex_unlock(&pfs_file->mutex);
+ 		return 0;
+ 	}
+ 
+-	if (((uint64_t)data_left_to_read) > (uint64_t)(encrypted_part_plain.size - offset)) // the request is bigger than what's left in the file
++	if (((uint64_t)data_left_to_read) > (uint64_t)(pfs_file->encrypted_part_plain.size - pfs_file->offset)) // the request is bigger than what's left in the file
+ 	{
+-		data_left_to_read = (size_t)(encrypted_part_plain.size - offset);
++		data_left_to_read = (size_t)(pfs_file->encrypted_part_plain.size - pfs_file->offset);
+ 	}
+ 	size_t data_attempted_to_read = data_left_to_read; // used at the end to return how much we actually read
+ 
+ 	unsigned char* out_buffer = (unsigned char*)ptr;
+ 
+ 	// the first block of user data is read from the meta-data encrypted part
+-	if (offset < MD_USER_DATA_SIZE)
++	if (pfs_file->offset < MD_USER_DATA_SIZE)
+ 	{
+-		size_t data_left_in_md = MD_USER_DATA_SIZE - (size_t)offset; // offset is smaller than MD_USER_DATA_SIZE
++		size_t data_left_in_md = MD_USER_DATA_SIZE - (size_t)pfs_file->offset; // offset is smaller than MD_USER_DATA_SIZE
+ 		if (data_left_to_read <= data_left_in_md)
+ 		{
+-			memcpy(out_buffer, &encrypted_part_plain.data[offset], data_left_to_read);
+-			offset += data_left_to_read;
++			memcpy(out_buffer, &pfs_file->encrypted_part_plain.data[pfs_file->offset], data_left_to_read);
++			pfs_file->offset += data_left_to_read;
+ 			out_buffer += data_left_to_read; // not needed, to prevent future errors
+ 			data_left_to_read = 0;
+ 		}
+ 		else
+ 		{
+-			memcpy(out_buffer, &encrypted_part_plain.data[offset], data_left_in_md);
+-			offset += data_left_in_md;
++			memcpy(out_buffer, &pfs_file->encrypted_part_plain.data[pfs_file->offset], data_left_in_md);
++			pfs_file->offset += data_left_in_md;
+ 			out_buffer += data_left_in_md;
+ 			data_left_to_read -= data_left_in_md;
+ 		}
+@@ -267,37 +275,37 @@ size_t protected_fs_file::read(void* ptr, size_t size, size_t count)
+ 	while (data_left_to_read > 0)
+ 	{
+ 		file_data_node_t* file_data_node = NULL;
+-		file_data_node = get_data_node(); // return the data node of the current offset, will read it from disk if needed (and also the mht node if needed)
++		file_data_node = get_data_node(pfs_file); // return the data node of the current offset, will read it from disk if needed (and also the mht node if needed)
+ 		if (file_data_node == NULL)
+ 			break;
+ 
+-		size_t offset_in_node = (offset - MD_USER_DATA_SIZE) % NODE_SIZE;
++		size_t offset_in_node = (pfs_file->offset - MD_USER_DATA_SIZE) % NODE_SIZE;
+ 		size_t data_left_in_node = NODE_SIZE - offset_in_node;
+ 		
+ 		if (data_left_to_read <= data_left_in_node)
+ 		{
+ 			memcpy(out_buffer, &file_data_node->plain.data[offset_in_node], data_left_to_read);
+-			offset += data_left_to_read;
++			pfs_file->offset += data_left_to_read;
+ 			out_buffer += data_left_to_read; // not needed, to prevent future errors
+ 			data_left_to_read = 0;
+ 		}
+ 		else
+ 		{
+ 			memcpy(out_buffer, &file_data_node->plain.data[offset_in_node], data_left_in_node);
+-			offset += data_left_in_node;
++			pfs_file->offset += data_left_in_node;
+ 			out_buffer += data_left_in_node;
+ 			data_left_to_read -= data_left_in_node;
+ 
+ 		}
+ 	}
+ 
+-	sgx_thread_mutex_unlock(&mutex);
++	sgx_thread_mutex_unlock(&pfs_file->mutex);
+ 
+ 	if (data_left_to_read == 0 &&
+ 		data_attempted_to_read != (size * count)) // user wanted to read more and we had to shrink the request
+ 	{
+-		assert(offset == encrypted_part_plain.size);
+-		end_of_file = true;
++		assert(pfs_file->offset == pfs_file->encrypted_part_plain.size);
++		pfs_file->end_of_file = true;
+ 	}
+ 
+ 	size_t ret_count = (data_attempted_to_read - data_left_to_read) / size;
+@@ -306,7 +314,7 @@ size_t protected_fs_file::read(void* ptr, size_t size, size_t count)
+ 
+ 
+ // this is a very 'specific' function, tied to the architecture of the file layout, returning the node numbers according to the offset in the file 
+-void get_node_numbers(uint64_t offset, uint64_t* mht_node_number, uint64_t* data_node_number, 
++static void get_node_numbers(uint64_t offset, uint64_t* mht_node_number, uint64_t* data_node_number, 
+ 					 uint64_t* physical_mht_node_number, uint64_t* physical_data_node_number)
+ {
+ 	// node 0 - meta data node
+@@ -339,24 +347,27 @@ void get_node_numbers(uint64_t offset, uint64_t* mht_node_number, uint64_t* data
+ }
+ 
+ 
+-file_data_node_t* protected_fs_file::get_data_node()
++static file_data_node_t* get_data_node(protected_fs_file_t *pfs_file)
+ {
+ 	file_data_node_t* file_data_node = NULL;
+ 
+-	if (offset < MD_USER_DATA_SIZE)
++    if (!pfs_file)
++        return NULL;
++        
++	if (pfs_file->offset < MD_USER_DATA_SIZE)
+ 	{
+-		last_error = SGX_ERROR_UNEXPECTED;
++		pfs_file->last_error = SGX_ERROR_UNEXPECTED;
+ 		return NULL;
+ 	}
+ 
+-	if ((offset - MD_USER_DATA_SIZE) % NODE_SIZE == 0 && 
+-		offset == encrypted_part_plain.size)
++	if ((pfs_file->offset - MD_USER_DATA_SIZE) % NODE_SIZE == 0 && 
++		pfs_file->offset == pfs_file->encrypted_part_plain.size)
+ 	{// new node
+-		file_data_node = append_data_node();
++		file_data_node = append_data_node(pfs_file);
+ 	}
+ 	else
+ 	{// existing node
+-		file_data_node = read_data_node();
++		file_data_node = read_data_node(pfs_file);
+ 	}
+ 
+ 	// bump all the parents mht to reside before the data node in the cache
+@@ -365,47 +376,53 @@ file_data_node_t* protected_fs_file::get_data_node()
+ 		file_mht_node_t* file_mht_node = file_data_node->parent;
+ 		while (file_mht_node->mht_node_number != 0)
+ 		{
+-			cache.get(file_mht_node->physical_node_number); // bump the mht node to the head of the lru
++			get(&pfs_file->cache, file_mht_node->physical_node_number); // bump the mht node to the head of the lru
+ 			file_mht_node = file_mht_node->parent;
+ 		}
+ 	}
+ 
+-	// even if we didn't get the required data_node, we might have read other nodes in the process
+-	while (cache.size() > MAX_PAGES_IN_CACHE)
++	/* Note: Logic for this while loop seems to be to keep the number of entries in cache, within
++	 * MAX_PAGES_IN_CACHE, by removing the last entry or after flushing. */
++    /* Note: We should hit this case...when we add more than 48(MAX_PAGES_IN_CACHE) data nodes, our hashmap's put function
++	is designed to do a rehash, if there is collision when adding new node, in which case, it doubles the length
++	of the hashtable. Also note that hashmap.size() returns the number of entries...NOT the length of the hashtable.*/
++	while (size(&pfs_file->cache) > MAX_PAGES_IN_CACHE)
+ 	{
+-		void* data = cache.get_last();
++	    DBG_PRINT("%s:%d: cache size->%u, greater than MAX_PAGES_IN_CACHE. \n",
++	            __func__, __LINE__, size(&pfs_file->cache));
++		void* data = get_last(&pfs_file->cache);
+ 		assert(data != NULL);
+ 		// for production - 
+ 		if (data == NULL)
+ 		{
+-			last_error = SGX_ERROR_UNEXPECTED;
++			pfs_file->last_error = SGX_ERROR_UNEXPECTED;
+ 			return NULL;
+ 		}
+ 		if (((file_data_node_t*)data)->need_writing == false) // need_writing is in the same offset in both node types
+ 		{
+-			cache.remove_last();
++			remove_last(&pfs_file->cache);
+ 
+ 			// before deleting the memory, need to scrub the plain secrets
+ 			if (((file_data_node_t*)data)->type == FILE_DATA_NODE_TYPE) // type is in the same offset in both node types
+ 			{
+ 				file_data_node_t* file_data_node1 = (file_data_node_t*)data;
+ 				memset_s(&file_data_node1->plain, sizeof(data_node_t), 0, sizeof(data_node_t));
+-				delete file_data_node1;
++				free(file_data_node1);
+ 			}
+ 			else
+ 			{
+ 				file_mht_node_t* file_mht_node = (file_mht_node_t*)data;
+ 				memset_s(&file_mht_node->plain, sizeof(mht_node_t), 0, sizeof(mht_node_t));
+-				delete file_mht_node;
++				free(file_mht_node);
+ 			}
+ 		}
+ 		else
+ 		{
+-			if (internal_flush(/*false,*/ false) == false) // error, can't flush cache, file status changed to error
++			if (internal_flush(pfs_file, /*false,*/ false) == false) // error, can't flush cache, file status changed to error
+ 			{
+-				assert(file_status != SGX_FILE_STATUS_OK);
+-				if (file_status == SGX_FILE_STATUS_OK)
+-					file_status = SGX_FILE_STATUS_FLUSH_ERROR; // for release set this anyway
++				assert(pfs_file->file_status != SGX_FILE_STATUS_OK);
++				if (pfs_file->file_status == SGX_FILE_STATUS_OK)
++					pfs_file->file_status = SGX_FILE_STATUS_FLUSH_ERROR; // for release set this anyway
+ 				return NULL; // even if we got the data_node!
+ 			}
+ 		}
+@@ -415,33 +432,40 @@ file_data_node_t* protected_fs_file::get_data_node()
+ }
+ 
+ 
+-file_data_node_t* protected_fs_file::append_data_node()
++static file_data_node_t* append_data_node(protected_fs_file_t *pfs_file)
+ {
+-	file_mht_node_t* file_mht_node = get_mht_node();
++    if (!pfs_file)
++        return NULL;
++            
++	file_mht_node_t* file_mht_node = get_mht_node(pfs_file);
+ 	if (file_mht_node == NULL) // some error happened
+ 		return NULL;
+ 
+-	file_data_node_t* new_file_data_node = NULL;
++	/*  try {
++	        new_file_data_node = new file_data_node_t;
++	    }
++	    catch (std::bad_alloc e) {
++	        (void)e; // remove warning
++	        last_error = ENOMEM;
++	        return NULL;
++	    }*/
+ 
+-	try {
+-		new_file_data_node = new file_data_node_t;
+-	}
+-	catch (std::bad_alloc e) {
+-		(void)e; // remove warning
+-		last_error = ENOMEM;
++	file_data_node_t* new_file_data_node = (file_data_node_t *)calloc(sizeof(file_data_node_t), 1);
++	if (!new_file_data_node)
++	{
++		pfs_file->last_error = ENOMEM;
+ 		return NULL;
+ 	}
+-	memset(new_file_data_node, 0, sizeof(file_data_node_t));
+-
++		
+ 	new_file_data_node->type = FILE_DATA_NODE_TYPE;
+ 	new_file_data_node->new_node = true;
+ 	new_file_data_node->parent = file_mht_node;
+-	get_node_numbers(offset, NULL, &new_file_data_node->data_node_number, NULL, &new_file_data_node->physical_node_number);
++	get_node_numbers(pfs_file->offset, NULL, &new_file_data_node->data_node_number, NULL, &new_file_data_node->physical_node_number);
+ 
+-	if (cache.add(new_file_data_node->physical_node_number, new_file_data_node) == false)
++	if (add(&pfs_file->cache, new_file_data_node->physical_node_number, new_file_data_node) == false)
+ 	{
+-		delete new_file_data_node;
+-		last_error = ENOMEM;
++		free(new_file_data_node);
++		pfs_file->last_error = ENOMEM;
+ 		return NULL;
+ 	}
+ 
+@@ -449,7 +473,7 @@ file_data_node_t* protected_fs_file::append_data_node()
+ }
+ 
+ 
+-file_data_node_t* protected_fs_file::read_data_node()
++static file_data_node_t* read_data_node(protected_fs_file_t *pfs_file)
+ {
+ 	uint64_t data_node_number;
+ 	uint64_t physical_node_number;
+@@ -457,37 +481,47 @@ file_data_node_t* protected_fs_file::read_data_node()
+ 	int32_t result32;
+ 	sgx_status_t status;
+ 
+-	get_node_numbers(offset, NULL, &data_node_number, NULL, &physical_node_number);
++    if (!pfs_file)
++        return NULL;
++
++	get_node_numbers(pfs_file->offset, NULL, &data_node_number, NULL, &physical_node_number);
+ 
+-	file_data_node_t* file_data_node = (file_data_node_t*)cache.get(physical_node_number);
++	file_data_node_t* file_data_node = (file_data_node_t*)get(&pfs_file->cache, physical_node_number);
+ 	if (file_data_node != NULL)
+ 		return file_data_node;
+ 	
+ 	// need to read the data node from the disk
+ 
+-	file_mht_node = get_mht_node();
++	file_mht_node = get_mht_node(pfs_file);
+ 	if (file_mht_node == NULL) // some error happened
+ 		return NULL;
+ 
+-	try {
++	/*try {
+ 		file_data_node = new file_data_node_t;
+ 	}
+ 	catch (std::bad_alloc e) {
+ 		(void)e; // remove warning
+ 		last_error = ENOMEM;
+ 		return NULL;
++	}*/
++	
++	file_data_node = (file_data_node_t *)calloc(sizeof(file_data_node_t), 1);
++	if (!file_data_node)
++	{
++		pfs_file->last_error = ENOMEM;
++		return NULL;
+ 	}
+-	memset(file_data_node, 0, sizeof(file_data_node_t));
++
+ 	file_data_node->type = FILE_DATA_NODE_TYPE;
+ 	file_data_node->data_node_number = data_node_number;
+ 	file_data_node->physical_node_number = physical_node_number;
+ 	file_data_node->parent = file_mht_node;
+ 		
+-	status = (sgx_status_t)u_sgxprotectedfs_fread_node_wrap(&result32, file, file_data_node->physical_node_number, file_data_node->encrypted.cipher, NODE_SIZE);
++	status = (sgx_status_t)u_sgxprotectedfs_fread_node_wrap(&result32, pfs_file->file, file_data_node->physical_node_number, file_data_node->encrypted.cipher, NODE_SIZE);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+ 		delete file_data_node;
+-		last_error = (status != SGX_SUCCESS) ? status : 
++		pfs_file->last_error = (status != SGX_SUCCESS) ? status : 
+ 					 (result32 != -1) ? result32 : EIO;
+ 		return NULL;
+ 	}
+@@ -495,26 +529,26 @@ file_data_node_t* protected_fs_file::read_data_node()
+ 	gcm_crypto_data_t* gcm_crypto_data = &file_data_node->parent->plain.data_nodes_crypto[file_data_node->data_node_number % ATTACHED_DATA_NODES_COUNT];
+ 
+ 	// this function decrypt the data _and_ checks the integrity of the data against the gmac
+-	status = sgx_rijndael128GCM_decrypt(&gcm_crypto_data->key, file_data_node->encrypted.cipher, NODE_SIZE, file_data_node->plain.data, empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &gcm_crypto_data->gmac);
++	status = sgx_rijndael128GCM_decrypt(&gcm_crypto_data->key, file_data_node->encrypted.cipher, NODE_SIZE, file_data_node->plain.data, pfs_file->empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &gcm_crypto_data->gmac);
+ 
+ 	DBG_PRINT("after sgx_gcm_dec, status=%d\n", (int)status);
+ 
+ 	if (status != SGX_SUCCESS)
+ 	{
+-		delete file_data_node;
+-		last_error = status;
++		free(file_data_node);
++		pfs_file->last_error = status;
+ 		if (status == SGX_ERROR_MAC_MISMATCH)
+ 		{
+-			file_status = SGX_FILE_STATUS_CORRUPTED;
++			pfs_file->file_status = SGX_FILE_STATUS_CORRUPTED;
+ 		}
+ 		return NULL;
+ 	}
+ 		
+-	if (cache.add(file_data_node->physical_node_number, file_data_node) == false)
++	if (add(&pfs_file->cache, file_data_node->physical_node_number, file_data_node) == false)
+ 	{
+ 		memset_s(&file_data_node->plain, sizeof(data_node_t), 0, sizeof(data_node_t)); // scrub the plaintext data
+-		delete file_data_node;
+-		last_error = ENOMEM;
++		free(file_data_node);
++		pfs_file->last_error = ENOMEM;
+ 		return NULL;
+ 	}
+ 
+@@ -522,48 +556,54 @@ file_data_node_t* protected_fs_file::read_data_node()
+ }
+ 
+ 
+-file_mht_node_t* protected_fs_file::get_mht_node()
++static file_mht_node_t* get_mht_node(protected_fs_file_t *pfs_file)
+ {
+ 	file_mht_node_t* file_mht_node;
+ 	uint64_t mht_node_number;
+ 	uint64_t physical_mht_node_number;
+ 
+-	if (offset < MD_USER_DATA_SIZE)
++    if (!pfs_file)
++        return NULL;
++
++	if (pfs_file->offset < MD_USER_DATA_SIZE)
+ 	{
+-		last_error = SGX_ERROR_UNEXPECTED;
++		pfs_file->last_error = SGX_ERROR_UNEXPECTED;
+ 		return NULL;
+ 	}
+ 
+-	get_node_numbers(offset, &mht_node_number, NULL, &physical_mht_node_number, NULL);
++	get_node_numbers(pfs_file->offset, &mht_node_number, NULL, &physical_mht_node_number, NULL);
+ 
+ 	if (mht_node_number == 0)
+-		return &root_mht;
++		return &pfs_file->root_mht;
+ 
+ 	// file is constructed from 128*4KB = 512KB per MHT node.
+-	if ((offset - MD_USER_DATA_SIZE) % (ATTACHED_DATA_NODES_COUNT * NODE_SIZE) == 0 && 
+-		 offset == encrypted_part_plain.size)
++	if ((pfs_file->offset - MD_USER_DATA_SIZE) % (ATTACHED_DATA_NODES_COUNT * NODE_SIZE) == 0 && 
++		 pfs_file->offset == pfs_file->encrypted_part_plain.size)
+ 	{
+-		file_mht_node = append_mht_node(mht_node_number);
++		file_mht_node = append_mht_node(pfs_file, mht_node_number);
+ 	}
+ 	else
+ 	{
+-		file_mht_node = read_mht_node(mht_node_number);
++		file_mht_node = read_mht_node(pfs_file, mht_node_number);
+ 	}
+ 
+ 	return file_mht_node;
+ }
+ 
+ 
+-file_mht_node_t* protected_fs_file::append_mht_node(uint64_t mht_node_number)
++static file_mht_node_t* append_mht_node(protected_fs_file_t *pfs_file, uint64_t mht_node_number)
+ {
+-	file_mht_node_t* parent_file_mht_node = read_mht_node((mht_node_number - 1) / CHILD_MHT_NODES_COUNT);
++    if (!pfs_file)
++        return NULL;
++
++	file_mht_node_t* parent_file_mht_node = read_mht_node(pfs_file, (mht_node_number - 1) / CHILD_MHT_NODES_COUNT);
+ 	if (parent_file_mht_node == NULL) // some error happened
+ 		return NULL;
+ 
+ 	uint64_t physical_node_number = 1 + // meta data node
+ 										mht_node_number * (1 + ATTACHED_DATA_NODES_COUNT); // the '1' is for the mht node preceding every 96 data nodes
+ 
+-	file_mht_node_t* new_file_mht_node = NULL;
++	/*file_mht_node_t* new_file_mht_node = NULL;
+ 	try {
+ 		new_file_mht_node = new file_mht_node_t;
+ 	}
+@@ -571,8 +611,14 @@ file_mht_node_t* protected_fs_file::append_mht_node(uint64_t mht_node_number)
+ 		(void)e; // remove warning
+ 		last_error = ENOMEM;
+ 		return NULL;
++	}*/
++	
++	file_mht_node_t* new_file_mht_node = (file_mht_node_t *)calloc(sizeof(file_mht_node_t), 1);
++	if (!new_file_mht_node)
++	{
++		pfs_file->last_error = ENOMEM;
++		return NULL;
+ 	}
+-	memset(new_file_mht_node, 0, sizeof(file_mht_node_t));
+ 
+ 	new_file_mht_node->type = FILE_MHT_NODE_TYPE;
+ 	new_file_mht_node->new_node = true;
+@@ -580,10 +626,10 @@ file_mht_node_t* protected_fs_file::append_mht_node(uint64_t mht_node_number)
+ 	new_file_mht_node->mht_node_number = mht_node_number;
+ 	new_file_mht_node->physical_node_number = physical_node_number;
+ 
+-	if (cache.add(new_file_mht_node->physical_node_number, new_file_mht_node) == false)
++	if (add(&pfs_file->cache, new_file_mht_node->physical_node_number, new_file_mht_node) == false)
+ 	{
+-		delete new_file_mht_node;
+-		last_error = ENOMEM;
++		free(new_file_mht_node);
++		pfs_file->last_error = ENOMEM;
+ 		return NULL;
+ 	}
+ 	
+@@ -591,44 +637,54 @@ file_mht_node_t* protected_fs_file::append_mht_node(uint64_t mht_node_number)
+ }
+ 
+ 
+-file_mht_node_t* protected_fs_file::read_mht_node(uint64_t mht_node_number)
++static file_mht_node_t* read_mht_node(protected_fs_file_t *pfs_file, uint64_t mht_node_number)
+ {
+ 	int32_t result32;
+ 	sgx_status_t status;
+ 
++    if (!pfs_file)
++        return NULL;
++
+ 	if (mht_node_number == 0)
+-		return &root_mht;
++		return &pfs_file->root_mht;
+ 
+ 	uint64_t physical_node_number = 1 + // meta data node
+ 										mht_node_number * (1 + ATTACHED_DATA_NODES_COUNT); // the '1' is for the mht node preceding every 96 data nodes
+ 
+-	file_mht_node_t* file_mht_node = (file_mht_node_t*)cache.find(physical_node_number);
++	file_mht_node_t* file_mht_node = (file_mht_node_t*)find(&pfs_file->cache, physical_node_number);
+ 	if (file_mht_node != NULL)
+ 		return file_mht_node;
+ 
+-	file_mht_node_t* parent_file_mht_node = read_mht_node((mht_node_number - 1) / CHILD_MHT_NODES_COUNT);
++	file_mht_node_t* parent_file_mht_node = read_mht_node(pfs_file, (mht_node_number - 1) / CHILD_MHT_NODES_COUNT);
+ 	if (parent_file_mht_node == NULL) // some error happened
+ 		return NULL;
+ 
+-	try {
++	/*try {
+ 		file_mht_node = new file_mht_node_t;
+ 	}
+ 	catch (std::bad_alloc e) {
+ 		(void)e; // remove warning
+ 		last_error = ENOMEM;
+ 		return NULL;
++	}*/
++    
++    file_mht_node = (file_mht_node_t *)calloc(sizeof(file_mht_node_t), 1);
++	if (!file_mht_node)
++	{
++		pfs_file->last_error = ENOMEM;
++		return NULL;
+ 	}
+-	memset(file_mht_node, 0, sizeof(file_mht_node_t));
++
+ 	file_mht_node->type = FILE_MHT_NODE_TYPE;
+ 	file_mht_node->mht_node_number = mht_node_number;
+ 	file_mht_node->physical_node_number = physical_node_number;
+ 	file_mht_node->parent = parent_file_mht_node;
+ 		
+-	status = (sgx_status_t)u_sgxprotectedfs_fread_node_wrap(&result32, file, file_mht_node->physical_node_number, file_mht_node->encrypted.cipher, NODE_SIZE);
++	status = (sgx_status_t)u_sgxprotectedfs_fread_node_wrap(&result32, pfs_file->file, file_mht_node->physical_node_number, file_mht_node->encrypted.cipher, NODE_SIZE);
+ 	if (status != SGX_SUCCESS || result32 != 0)
+ 	{
+-		delete file_mht_node;
+-		last_error = (status != SGX_SUCCESS) ? status : 
++		free(file_mht_node);
++		pfs_file->last_error = (status != SGX_SUCCESS) ? status : 
+ 					 (result32 != -1) ? result32 : EIO;
+ 		return NULL;
+ 	}
+@@ -636,26 +692,26 @@ file_mht_node_t* protected_fs_file::read_mht_node(uint64_t mht_node_number)
+ 	gcm_crypto_data_t* gcm_crypto_data = &file_mht_node->parent->plain.mht_nodes_crypto[(file_mht_node->mht_node_number - 1) % CHILD_MHT_NODES_COUNT];
+ 
+ 	// this function decrypt the data _and_ checks the integrity of the data against the gmac
+-	status = sgx_rijndael128GCM_decrypt(&gcm_crypto_data->key, file_mht_node->encrypted.cipher, NODE_SIZE, (uint8_t*)&file_mht_node->plain, empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &gcm_crypto_data->gmac);
++	status = sgx_rijndael128GCM_decrypt(&gcm_crypto_data->key, file_mht_node->encrypted.cipher, NODE_SIZE, (uint8_t*)&file_mht_node->plain, pfs_file->empty_iv, SGX_AESGCM_IV_SIZE, NULL, 0, &gcm_crypto_data->gmac);
+ 
+-        DBG_PRINT("after sgx_gcm_dec, status=%d\n", (int)status);
++    DBG_PRINT("after sgx_gcm_dec, status=%d\n", (int)status);
+ 
+ 	if (status != SGX_SUCCESS)
+ 	{
+-		delete file_mht_node;
+-		last_error = status;
++		free(file_mht_node);
++		pfs_file->last_error = status;
+ 		if (status == SGX_ERROR_MAC_MISMATCH)
+ 		{
+-			file_status = SGX_FILE_STATUS_CORRUPTED;
++			pfs_file->file_status = SGX_FILE_STATUS_CORRUPTED;
+ 		}
+ 		return NULL;
+ 	}
+ 
+-	if (cache.add(file_mht_node->physical_node_number, file_mht_node) == false)
++	if (add(&pfs_file->cache, file_mht_node->physical_node_number, file_mht_node) == false)
+ 	{
+ 		memset_s(&file_mht_node->plain, sizeof(mht_node_t), 0, sizeof(mht_node_t));
+-		delete file_mht_node;
+-		last_error = ENOMEM;
++		free(file_mht_node);
++		pfs_file->last_error = ENOMEM;
+ 		return NULL;
+ 	}
+ 
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/lru_cache.cpp b/sdk/protected_fs/sgx_tprotected_fs/lru_cache.cpp
+index 0bf919e..3307c00 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/lru_cache.cpp
++++ b/sdk/protected_fs/sgx_tprotected_fs/lru_cache.cpp
+@@ -1,275 +1,380 @@
+-/*
+- * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- *
+- *   * Redistributions of source code must retain the above copyright
+- *     notice, this list of conditions and the following disclaimer.
+- *   * Redistributions in binary form must reproduce the above copyright
+- *     notice, this list of conditions and the following disclaimer in
+- *     the documentation and/or other materials provided with the
+- *     distribution.
+- *   * Neither the name of Intel Corporation nor the names of its
+- *     contributors may be used to endorse or promote products derived
+- *     from this software without specific prior written permission.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+- *
+- */
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
+ 
+ #include "lru_cache.h"
+ 
++//Note: Just added header file for debug prints..
++#include "protected_fs_file.h"
++
++/* Declare type-specific cache_hashmap_* functions with this handy macro */
++HASHMAP_FUNCS_DECLARE(cache, void, map_node_t)
++HASHMAP_FUNCS_CREATE(cache, void, map_node_t)
++
++size_t hashmap_hash_uint64(const void* key) {
++    const uint8_t* byte = (const uint8_t*)key;
++    uint8_t i;
++    size_t hash = 0;
++
++    for (i = 0; i < sizeof(uint64_t); ++i, ++byte) {
++        hash += *byte;
++        hash += (hash << 10);
++        hash ^= (hash >> 6);
++    }
++    hash += (hash << 3);
++    hash ^= (hash >> 11);
++    hash += (hash << 15);
++    return hash;
++}
+ 
+-
+-lru_cache::lru_cache()
+-{
+-	m_it = list.begin();
++int hashmap_compare_uint64(const void* a, const void* b) {
++    return *(int64_t*)a - *(int64_t*)b;
+ }
+ 
++int init_lru_cache(lru_cache_t* lru_cache) {
++    int ret_val = 0;
++    if (!lru_cache)
++        return EINVAL;
+ 
+-lru_cache::~lru_cache()
+-{
+-	list_node_t* list_node;
+-	map_node_t* map_node;
+-	
+-	while (list.size() > 0)
+-	{
+-		list_node = list.front();
+-		map_node = map[list_node->key];
+-		
+-		map.erase(list_node->key);
+-		delete map_node;
+-
+-		list.pop_front();
+-		delete list_node;
+-	}
+-
+-	assert(list.empty() == true);
+-	assert(map.empty() == true);
+-}
++    LISTP_INITIALIZE(&lru_cache->the_list);
++    lru_cache->list_it = LISTP_FIRST_ENTRY(&lru_cache->the_list, list_node_t, list);
++
++    /* Initialize with default key functions and init size(MAX_PAGES_IN_CACHE) */
++    ret_val = hashmap_init(&lru_cache->map, hashmap_hash_uint64, hashmap_compare_uint64, MAX_PAGES_IN_CACHE);
+ 
++    DBG_PRINT("%s:ret_val = %d\n", __func__, ret_val);
+ 
+-void lru_cache::rehash(uint32_t size_)
+-{
+-	map.rehash(size_);
++    return ret_val;
+ }
+ 
++void destroy_lru_cache(lru_cache_t* lru_cache) {
++    list_node_t* list_node;
++    map_node_t* map_node;
++
++    DBG_PRINT("%s:\n", __func__);
++
++    if (!lru_cache)
++        return;
++
++    while (LISTP_SIZE(&lru_cache->the_list) > 0) {
++        list_node = LISTP_FIRST_ENTRY(&lru_cache->the_list, list_node_t, list);
++
++        if (list_node) {
++            map_node = cache_hashmap_get(&lru_cache->map, &list_node->key);
++
++            assert(map_node != NULL);
++            if (map_node)
++                free(map_node);
++
++            /*TODO: To check,if this is enough...or do we need to iterate using
++             * hash map iterate */
++            if (!cache_hashmap_remove(&lru_cache->map, &list_node->key)) {
++                DBG_PRINT("could not remove expected key\n");
++            }
+ 
+-bool lru_cache::add(uint64_t key, void* data)
+-{
+-	map_node_t* map_node = NULL;
+-	list_node_t* list_node = NULL;
+-	
+-	try {
+-		map_node = new map_node_t();
+-		list_node = new list_node_t();
+-	}
+-	catch (std::bad_alloc e) {
+-		(void)e; // remove warning
+-		return false;
+-	}
+-	
+-	list_node->key = key;
+-	list.push_front(list_node);
+-
+-	map_iterator map_it = map.find(key);
+-	assert(map_it == map.end());
+-	if (map_it != map.end())
+-	{
+-		// this indicates some fatal problem, perhaps race issue caused by bad locks...
+-		map_node_t* tmp_map_node = map_it->second;
+-		if (tmp_map_node != NULL)
+-			delete tmp_map_node;
+-		map.erase(map_it);
+-	}
+-
+-	map_node->data = data;
+-	map_node->list_it = list.begin();
+-	
+-	map[key] = map_node;
+-	
+-	return true;
++            LISTP_DEL(list_node, &lru_cache->the_list, list);
++            free(list_node);
++        }
++    }
++
++    if (LISTP_SIZE(&lru_cache->the_list) != 0) {
++        DBG_PRINT("%s: error, list not empty, size=%lu\n", __func__, LISTP_SIZE(&lru_cache->the_list));
++    }
++
++    if (hashmap_size(&lru_cache->map) != 0) {
++        DBG_PRINT("%s: error, hashmap not empty, size=%lu\n", __func__, hashmap_size(&lru_cache->map));
++    }
++
++    assert(LISTP_SIZE(&lru_cache->the_list) == 0);
++    assert(hashmap_size(&lru_cache->map) == 0);
++}
++
++bool add(lru_cache_t* lru_cache, uint64_t key, void* data) {
++    map_node_t* map_node   = NULL;
++    list_node_t* list_node = NULL;
++    map_node_t* add_map    = NULL;
++
++    DBG_PRINT("%s:%d:\n", __func__, __LINE__);
++
++    if (!lru_cache)
++        return false;
++
++    list_node = (list_node_t*)malloc(sizeof(list_node_t));
++
++    if (!list_node)
++        return false;
++
++    add_map = (map_node_t*)malloc(sizeof(map_node_t));
++
++    if (!add_map) {
++        free(list_node);
++        return false;
++    }
++
++    list_node->key = key;
++    LISTP_PUSH_FRONT(list_node, &lru_cache->the_list, list);
++
++    DBG_PRINT("%s: added list_node_ptr=%p, key->%lu\n", __func__, list_node, list_node->key);
++    DBG_PRINT("%s: list size=%ld\n", __func__, LISTP_SIZE(&lru_cache->the_list));
++
++    map_node = cache_hashmap_get(&lru_cache->map, &key);
++    if (map_node != NULL) {
++        // this indicates some fatal problem, perhaps race issue caused by bad
++        // locks...
++        if (!cache_hashmap_remove(&lru_cache->map, &key)) {
++            DBG_PRINT("%s: could not remove expected key\n", __func__);
++            return false;
++        } else
++            free(map_node);
++    }
++
++    add_map->data    = data;
++    add_map->list_it = list_node;
++    map_node         = cache_hashmap_put(&lru_cache->map, &list_node->key, add_map);
++    if (!map_node) {
++        DBG_PRINT("hashmap put failed\n");
++        return false;
++    }
++    if (map_node != add_map) {
++        DBG_PRINT("duplicate key found\n");
++        return false;
++    }
++
++    DBG_PRINT("%s:%d:added key->%lu, NODE_TYPE->%s, NODE_PTR->%p\n",
++            __func__, __LINE__, key,
++            ((((file_data_node_t*)data)->type == FILE_DATA_NODE_TYPE)?"DATA_NODE":"MHT_NODE"),
++            data);
++
++    return true;
+ }
+ 
++void* find(lru_cache_t* lru_cache, uint64_t key) {
++    if (!lru_cache)
++        return NULL;
+ 
+-void* lru_cache::find(uint64_t key)
+-{
+-	map_iterator map_it = map.find(key);
+-	if (map_it == map.end())
+-		return NULL;
++    map_node_t* map_node;
+ 
+-	map_node_t* map_node = map_it->second;
+-	return map_node->data;
++    DBG_PRINT("%s:%d:\n", __func__, __LINE__);
++
++    map_node = cache_hashmap_get(&lru_cache->map, &key);
++    if (!map_node) {
++        DBG_PRINT("entry not found\n");
++        return NULL;
++    }
++
++    return map_node->data;
++}
++
++/* Note: As part of get, this function also moves
++ * the recently fetched key(which is part of a list)...to the
++ * front of the lru_cache's list.
++ */
++void* get(lru_cache_t* lru_cache, uint64_t key) {
++    if (!lru_cache)
++        return NULL;
++
++    DBG_PRINT("%s:%d: key=%lu\n", __func__, __LINE__, key);
++
++    map_node_t* map_node;
++
++    map_node = cache_hashmap_get(&lru_cache->map, &key);
++    if (!map_node) {
++        DBG_PRINT("entry not found\n");
++        return NULL;
++    }
++
++    list_node_t* list_node = map_node->list_it;
++    assert(list_node != NULL);
++    if (list_node == NULL)  // this should never happen, but just in case, code is
++                            // here to fix it
++    {
++        list_node = (list_node_t*)malloc(sizeof(list_node_t));
++        if (!list_node)
++            return NULL;
++        list_node->key = key;
++    }
++
++    LISTP_DEL(list_node, &lru_cache->the_list, list);
++    LISTP_PUSH_FRONT(list_node, &lru_cache->the_list, list);
++    map_node->list_it = LISTP_FIRST_ENTRY(&lru_cache->the_list, list_node_t, list);
++
++#ifdef DEBUG_CODE
++    if (map_node->list_it)
++        DBG_PRINT("%s: first entry in list ptr=%p, key->%lu\n", __func__, map_node->list_it,
++               map_node->list_it->key);
++    else
++        DBG_PRINT("%s: list's 1st entry is NULL\n", __func__);
++#endif
++
++    return map_node->data;
+ }
+ 
++uint32_t size(lru_cache_t* lru_cache) {
++    DBG_PRINT("%s:%d:\n", __func__, __LINE__);
+ 
+-void* lru_cache::get(uint64_t key)
+-{
+-	map_iterator map_it = map.find(key);
+-	if (map_it == map.end())
+-		return NULL;
+-
+-	map_node_t* map_node = map_it->second;
+-
+-	list_node_t* list_node = *(map_node->list_it);
+-	assert(list_node != NULL);
+-	if (list_node == NULL) // this should never happen, but just in case, code is here to fix it
+-	{
+-		try {
+-			list_node = new list_node_t();
+-			list_node->key = map_it->first;
+-		}
+-		catch (std::bad_alloc e) {
+-			(void)e; // remove warning
+-			return NULL;
+-		}
+-	}
+-	
+-	list.erase(map_node->list_it);
+-	list.push_front(list_node);
+-
+-	map_node->list_it = list.begin();
+-
+-	return map_node->data;
++    if (!lru_cache)
++        return 0;
++
++    if (LISTP_SIZE(&lru_cache->the_list) != hashmap_size(&lru_cache->map)) {
++        DBG_PRINT("%s: error, list size=%lu, hashmap-size=%lu\n", __func__,
++               LISTP_SIZE(&lru_cache->the_list), hashmap_size(&lru_cache->map));
++    }
++
++    assert(LISTP_SIZE(&lru_cache->the_list) == hashmap_size(&lru_cache->map));
++
++    DBG_PRINT("%s:%d: size=%ld\n",
++            __func__, __LINE__, LISTP_SIZE(&lru_cache->the_list));
++
++    return (uint32_t)LISTP_SIZE(&lru_cache->the_list);
+ }
+ 
++#ifdef DEBUG_CODE
++void print_list(lru_cache_t* lru_cache) {
++    list_node_t *f, *n;
++    int i = 0;
++
++    if (!lru_cache)
++        return;
++
++    if (LISTP_SIZE(&lru_cache->the_list) == 0)
++        return;
+ 
+-uint32_t lru_cache::size()
+-{
+-	assert(list.size() == map.size());
+-	return (uint32_t)list.size();
++    LISTP_FOR_EACH_ENTRY_SAFE(f, n, &lru_cache->the_list, list) {
++        DBG_PRINT("%s: list index=%d, list-node-%p, list-val=%lu\n", __func__, i++, f, f->key);
++    }
+ }
++#endif
+ 
++void* get_first(lru_cache_t* lru_cache) {
+ 
+-void* lru_cache::get_first()
+-{
+-	if (list.size() == 0)
+-		return NULL;
++    if (!lru_cache)
++        return NULL;
+ 
+-	m_it = list.begin();
+-	if (m_it == list.end())
+-		return NULL;
++    if (LISTP_SIZE(&lru_cache->the_list) == 0)
++        return NULL;
+ 
+-	list_node_t* list_node = (*m_it);
+-	assert(list_node != NULL);
+-	if (list_node == NULL)
+-		return NULL;
++    lru_cache->list_it = LISTP_FIRST_ENTRY(&lru_cache->the_list, list_node_t, list);
+ 
+-	map_iterator map_it = map.find(list_node->key);
+-	assert(map_it != map.end());
+-	if (map_it == map.end())
+-		return NULL;
++    DBG_PRINT("%s: list_it=%p\n", __func__, lru_cache->list_it);
+ 
+-	map_node_t* map_node = map_it->second;
+-	assert(map_node != NULL);
+-	if (map_node == NULL)
+-		return NULL;
++    if (!lru_cache->list_it)
++        return NULL;
+ 
+-	return map_node->data;
++    map_node_t* map_node;
++
++    map_node = cache_hashmap_get(&lru_cache->map, &lru_cache->list_it->key);
++    if (!map_node) {
++        DBG_PRINT("entry not found\n");
++        return NULL;
++    }
++
++    DBG_PRINT("%s:%d: returning data for key->%lu\n",
++            __func__, __LINE__, lru_cache->list_it->key);
++
++    return map_node->data;
+ }
+ 
+-void* lru_cache::get_next()
+-{
+-	if (list.size() == 0)
+-		return NULL;
++void* get_next(lru_cache_t* lru_cache) {
+ 
+-	++m_it;
++    if (!lru_cache)
++        return NULL;
+ 
+-	if (m_it == list.end())
+-		return NULL;
++    if (LISTP_SIZE(&lru_cache->the_list) == 0)
++        return NULL;
+ 
+-	list_node_t* list_node = (*m_it);
+-	assert(list_node != NULL);
+-	if (list_node == NULL)
+-		return NULL;
++    lru_cache->list_it = LISTP_NEXT_ENTRY(lru_cache->list_it, &lru_cache->the_list, list);
+ 
+-	map_iterator map_it = map.find(list_node->key);
+-	assert(map_it != map.end());
+-	if (map_it == map.end())
+-		return NULL;
++    if (!lru_cache->list_it)
++        return NULL;
+ 
+-	map_node_t* map_node = map_it->second;
+-	assert(map_node != NULL);
+-	if (map_node == NULL)
+-		return NULL;
++    map_node_t* map_node;
++    map_node = cache_hashmap_get(&lru_cache->map, &lru_cache->list_it->key);
++    if (!map_node) {
++        DBG_PRINT("entry not found\n");
++        return NULL;
++    }
+ 
+-	return map_node->data;
++    DBG_PRINT("%s:%d: returning data for key->%lu\n",
++            __func__, __LINE__, lru_cache->list_it->key);
++
++    return map_node->data;
+ }
+ 
++void* get_last(lru_cache_t* lru_cache) {
++    DBG_PRINT("%s:%d:\n", __func__, __LINE__);
++
++    list_node_t* list_node = NULL;
++    if (!lru_cache)
++        return NULL;
+ 
+-void* lru_cache::get_last()
+-{
+-	if (list.size() == 0)
+-		return NULL;
+-
+-	list_iterator it = list.end(); // pointer to the object past-the-end
+-	assert(it != list.begin());
+-	if (it == list.begin()) // the list is empty
+-		return NULL;
+-	
+-	--it; // now it points to the last object
+-	list_node_t* list_node = (*it);
+-	assert(list_node != NULL);
+-	if (list_node == NULL)
+-		return NULL;
+-
+-	map_iterator map_it = map.find(list_node->key);
+-	assert(map_it != map.end());
+-	if (map_it == map.end())
+-		return NULL;
+-
+-	map_node_t* map_node = map_it->second;
+-	assert(map_node != NULL);
+-	if (map_node == NULL)
+-		return NULL;
+-
+-	return map_node->data;
++    if (LISTP_SIZE(&lru_cache->the_list) == 0)
++        return NULL;
++
++    // wont be needed, bcos of size check; keeping for debug/reference
++    /*if (LISTP_EMPTY(&lru_cache->the_list) == true)
++        return NULL;*/
++
++    list_node = LISTP_LAST_ENTRY(&lru_cache->the_list, list_node_t, list);
++
++    if (!list_node)
++        return NULL;
++
++    DBG_PRINT("%s: list_node_ptr=%p, key->%lu\n", __func__, list_node, list_node->key);
++
++    map_node_t* map_node;
++    map_node = cache_hashmap_get(&lru_cache->map, &list_node->key);
++    if (!map_node) {
++        DBG_PRINT("%s: entry not found\n", __func__);
++        return NULL;
++    }
++
++    DBG_PRINT("%s: found map_node for list_node_ptr=%p, key->%lu\n", __func__, list_node,
++           list_node->key);
++
++    return map_node->data;
+ }
+ 
++void remove_last(lru_cache_t* lru_cache) {
++    DBG_PRINT("%s:%d:\n", __func__, __LINE__);
+ 
+-void lru_cache::remove_last()
+-{
+-	uint64_t key;
++    uint64_t key;
++    list_node_t* list_node = NULL;
+ 
+-	list_iterator it = list.end(); // pointer to the object past-the-end
+-	if (it == list.begin()) // the list is empty
+-		return;
++    if (!lru_cache)
++        return;
+ 
+-	--it; // now it points to the last object
++    if (LISTP_EMPTY(&lru_cache->the_list) == true)
++        return;
+ 
+-	list_node_t* list_node = (*it);
+-	list.erase(it);
+-	
+-	assert(list_node != NULL);
+-	if (list_node == NULL) // unclear how this can happen...
+-		return;
++    list_node = LISTP_LAST_ENTRY(&lru_cache->the_list, list_node_t, list);
+ 
+-	key = list_node->key;
+-	delete list_node;
++    assert(list_node != NULL);
++    if (list_node == NULL)  // unclear how this can happen...
++        return;
+ 
+-	map_iterator map_it = map.find(key);
+-	assert(map_it != map.end());
+-	if (map_it == map.end())
+-		return;
++    key = list_node->key;
++    DBG_PRINT("%s: list_node_ptr=%p, key->%lu\n", __func__, list_node, key);
+ 
+-	map_node_t* map_node = map_it->second;
+-	assert(map_node != NULL);
+-	if (map_node == NULL)
+-		return;
++    map_node_t* map_node;
++    map_node = cache_hashmap_get(&lru_cache->map, &key);
++    if (!map_node) {
++        DBG_PRINT("%s: entry not found\n", __func__);
++        return;
++    } else
++        free(map_node);
+ 
+-	map.erase(key);
+-	delete map_node;
+-}
++    /*TODO: To check,if this is enough...or do we need to iterate using hash
++     * map iterate */
++    if (!cache_hashmap_remove(&lru_cache->map, &key)) {
++        DBG_PRINT("%s: could not remove expected key\n", __func__);
++    }
+ 
++    /* Note: Since hashmap uses pointers to list_node->key(which is uint64), we
++     cannot delete the list_node, before deleting the map_node. If we do,
++     then we cannot look-up the key in the hashmap */
++    LISTP_DEL(list_node, &lru_cache->the_list, list);
++    free(list_node);
++
++    return;
++}
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/lru_cache.h b/sdk/protected_fs/sgx_tprotected_fs/lru_cache.h
+index 0b2e716..5d0cc85 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/lru_cache.h
++++ b/sdk/protected_fs/sgx_tprotected_fs/lru_cache.h
+@@ -1,99 +1,57 @@
+-/*
+- * Copyright (C) 2011-2018 Intel Corporation. All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- *
+- *   * Redistributions of source code must retain the above copyright
+- *     notice, this list of conditions and the following disclaimer.
+- *   * Redistributions in binary form must reproduce the above copyright
+- *     notice, this list of conditions and the following disclaimer in
+- *     the documentation and/or other materials provided with the
+- *     distribution.
+- *   * Neither the name of Intel Corporation nor the names of its
+- *     contributors may be used to endorse or promote products derived
+- *     from this software without specific prior written permission.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+- *
+- */
+-
+-#pragma once
+-
+-#ifndef _LRU_CACHE_H_
+-#define _LRU_CACHE_H_
++#ifndef _LRU_CACHE_C_H_
++#define _LRU_CACHE_C_H_
+ 
+ #include <assert.h>
+ 
+-#include <list>
+-
+-/* STL map is implemented as a tree, hence all operations are O(logN)
+-   STL unordered_map is implemented as hash, hence all operations are O(1)
+-   http://stackoverflow.com/questions/2196995/is-there-any-advantage-of-using-map-over-unordered-map-in-case-of-trivial-keys
+-   http://stackoverflow.com/questions/3902644/choosing-between-stdmap-and-stdunordered-map
+-   */
+-
+-#include <unordered_map>
+-
+-/* this hasher code was needed since strict ansi don't allow 'long long' type
+- * adding -U__STRICT_ANSI__ to the compilation flags solved the issue
+- * leaving this code here for future reference
+-namespace stlpmtx_std
+-{
+-template<> struct hash<uint64_t> {
+-  size_t operator()(uint64_t x) const { return (size_t)x; }
+-  };
++extern "C" {
++#include "hashmap.h"
+ }
+-*/
+ 
+-typedef struct _list_node
+-{
+-	uint64_t key;
+-} list_node_t;
++#include "list.h"
+ 
+-typedef struct _map_node
+-{
+-	void* data;
+-	std::list<list_node_t*>::iterator list_it;
+-} map_node_t;
+-
+-typedef std::unordered_map<uint64_t, map_node_t*>::iterator map_iterator;
+-typedef std::list<list_node_t*>::iterator list_iterator;
++#define MAX_PAGES_IN_CACHE 48
+ 
+-class lru_cache
+-{
+-private:
+-	std::list<list_node_t*> list;
+-	std::unordered_map<uint64_t, map_node_t*> map;
++typedef struct hashmap hashmap_t;
+ 
+-	list_iterator m_it; // for get_first and get_next sequence
++DEFINE_LIST(_list_node);
+ 
+-public:	
+-	lru_cache();
+-	~lru_cache();
++typedef struct _list_node {
++    uint64_t key;
++    LIST_TYPE(_list_node) list;  // The list node
++} list_node_t;
+ 
+-	void rehash(uint32_t size_);
++DEFINE_LISTP(_list_node);
+ 
+-	bool add(uint64_t key, void* p);
+-	void* get(uint64_t key);
+-	void* find(uint64_t key); // only returns the object, do not bump it to the head
+-	uint32_t size();
++typedef struct _map_node {
++    void* data;
++    list_node_t* list_it;
++} map_node_t;
+ 
+-	void* get_first();
+-	void* get_next();
+-	void* get_last();
+-	void remove_last();
+-};
++typedef struct _lru_cache {
++    LISTP_TYPE(_list_node) the_list;
++    hashmap_t map;
++    list_node_t* list_it;
++} lru_cache_t;
++
++extern "C" {
++int init_lru_cache(lru_cache_t* lru_cache);
++void destroy_lru_cache(lru_cache_t* lru_cache);
++
++void rehash(lru_cache_t* lru_cache, uint32_t size_);
++bool add(lru_cache_t* lru_cache, uint64_t key, void* p);
++void* get(lru_cache_t* lru_cache, uint64_t key);
++void* find(lru_cache_t* lru_cache,
++           uint64_t key);  // only returns the object, do not bump it to the head
++uint32_t size(lru_cache_t* lru_cache);
++
++void* get_first(lru_cache_t* lru_cache);
++void* get_next(lru_cache_t* lru_cache);
++void* get_last(lru_cache_t* lru_cache);
++void remove_last(lru_cache_t* lru_cache);
++
++#ifdef DEBUG_CODE
++void print_list(lru_cache_t* lru_cache);
++#endif
++}
+ 
+-#endif // _LRU_CACHE_H_
++#endif  //_LRU_CACHE_C_H_
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/protected_fs_file.h b/sdk/protected_fs/sgx_tprotected_fs/protected_fs_file.h
+index 8c99c9d..eeff1e3 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/protected_fs_file.h
++++ b/sdk/protected_fs/sgx_tprotected_fs/protected_fs_file.h
+@@ -45,7 +45,7 @@
+ 
+ #include "sgx_tprotected_fs.h"
+ 
+-#include "protfs_debug.h"
++#include "pfs_debug.h"
+ 
+ typedef enum
+ {
+@@ -136,99 +136,78 @@ typedef struct _file_data_node
+ 	data_node_t plain; // decrypted data
+ } file_data_node_t;
+ 
+-
+-class protected_fs_file
++typedef struct _protected_fs_file
+ {
+-private:
+-	union {
+-		struct {
+-			uint64_t meta_data_node_number; // for recovery purpose, so it is easy to write this node
+-			meta_data_node_t file_meta_data; // actual data from disk's meta data node
+-		};
+-		recovery_node_t meta_data_recovery_node;
+-	};
+-
+-	meta_data_encrypted_t encrypted_part_plain; // encrypted part of meta data node, decrypted
+-	
+-	file_mht_node_t root_mht; // the root of the mht is always needed (for files bigger than 3KB)
+-
+-	FILEPTR* file; // OS's FILE pointer
+-	
+-	open_mode_t open_mode;
+-	uint8_t read_only;
+-	int64_t offset; // current file position (user's view)
+-	bool end_of_file; // flag
+-
+-	int64_t real_file_size;
+-	
+-	bool need_writing; // flag
+-	uint32_t last_error; // last operation error
+-	protected_fs_status_e file_status;
+-	
+-	//sgx_thread_mutex_t mutex;
+-	pthread_mutex_t mutex;
+-
+-	uint8_t use_user_kdk_key;
+-	sgx_aes_gcm_128bit_key_t user_kdk_key; // recieved from user, used instead of the seal key
+-
+-	sgx_aes_gcm_128bit_key_t cur_key;
+-	sgx_aes_gcm_128bit_key_t session_master_key;
+-	uint32_t master_key_count;
+-	
+-	char recovery_filename[RECOVERY_FILE_MAX_LEN]; // might include full path to the file
+-
+-	lru_cache cache;
+-
+-	// these don't change after init...
+-	sgx_iv_t empty_iv;
+-	sgx_report_t report;
+-
+-	void init_fields();
+-	bool cleanup_filename(const char* src, char* dest);
+-	bool parse_mode(const char* mode);
+-	bool file_recovery(const char* filename);
+-	bool init_existing_file(const char* filename, const char* clean_filename, const sgx_aes_gcm_128bit_key_t* import_key);
+-	bool init_new_file(const char* clean_filename);
+-	
+-	bool generate_secure_blob(sgx_aes_gcm_128bit_key_t* key, const char* label, uint64_t physical_node_number, sgx_aes_gcm_128bit_tag_t* output);
+-	bool generate_secure_blob_from_user_kdk(bool restore);
+-	bool init_session_master_key();
+-	bool derive_random_node_key(uint64_t physical_node_number);
+-	bool generate_random_meta_data_key();
+-	bool restore_current_meta_data_key(const sgx_aes_gcm_128bit_key_t* import_key);
+-	
+-	
+-	file_data_node_t* get_data_node();
+-	file_data_node_t* read_data_node();
+-	file_data_node_t* append_data_node();
+-	file_mht_node_t* get_mht_node();
+-	file_mht_node_t* read_mht_node(uint64_t mht_node_number);
+-	file_mht_node_t* append_mht_node(uint64_t mht_node_number);
+-	bool write_recovery_file();
+-	bool set_update_flag(bool flush_to_disk);
+-	void clear_update_flag();
+-	bool update_all_data_and_mht_nodes();
+-	bool update_meta_data_node();
+-	bool write_all_changes_to_disk(bool flush_to_disk);
+-	void erase_recovery_file();
+-	bool internal_flush(/*bool mc,*/ bool flush_to_disk);
+-
+-public:
+-	protected_fs_file(const char* filename, const char* mode, const sgx_aes_gcm_128bit_key_t* import_key, const sgx_aes_gcm_128bit_key_t* kdk_key);
+-	~protected_fs_file();
+-
+-	size_t write(const void* ptr, size_t size, size_t count);
+-	size_t read(void* ptr, size_t size, size_t count);
+-	int64_t tell();
+-	int seek(int64_t new_offset, int origin);
+-	bool get_eof();
+-	uint32_t get_error();
+-	void clear_error();
+-	int32_t clear_cache();
+-	bool flush(/*bool mc*/);
+-	bool pre_close(sgx_key_128bit_t* key, bool import);
+-	static int32_t remove(const char* filename);
+-};
++    union {
++        struct {
++            uint64_t meta_data_node_number; // for recovery purpose, so it is easy to write this node
++            meta_data_node_t file_meta_data; // actual data from disk's meta data node
++        };
++        recovery_node_t meta_data_recovery_node;
++    };
++
++    meta_data_encrypted_t encrypted_part_plain; // encrypted part of meta data node, decrypted
++
++    file_mht_node_t root_mht; // the root of the mht is always needed (for files bigger than 3KB)
++
++    FILEPTR* file; // OS's FILE pointer
++
++    open_mode_t open_mode;
++    uint8_t read_only;
++    int64_t offset; // current file position (user's view)
++    bool end_of_file; // flag
++
++    int64_t real_file_size;
++
++    bool need_writing; // flag
++    uint32_t last_error; // last operation error
++    protected_fs_status_e file_status;
++
++    //sgx_thread_mutex_t mutex;
++    pthread_mutex_t mutex;
++
++    uint8_t use_user_kdk_key;
++    sgx_aes_gcm_128bit_key_t user_kdk_key; // recieved from user, used instead of the seal key
++
++    sgx_aes_gcm_128bit_key_t cur_key;
++    sgx_aes_gcm_128bit_key_t session_master_key;
++    uint32_t master_key_count;
++
++    char recovery_filename[RECOVERY_FILE_MAX_LEN]; // might include full path to the file
++
++    lru_cache_t cache;
++
++    // these don't change after init...
++    sgx_iv_t empty_iv;
++    sgx_report_t report;
++
++} protected_fs_file_t;
++
++//TODO: Should we add pfs_file_* prefix, for these public fns, similar to the other apis below.
++bool restore_current_meta_data_key(protected_fs_file_t *pfs_file, const sgx_aes_gcm_128bit_key_t* import_key);
++bool internal_flush(protected_fs_file_t *pfs_file, /*bool mc,*/ bool flush_to_disk);
++void erase_recovery_file(protected_fs_file_t *pfs_file);
++bool write_all_changes_to_disk(protected_fs_file_t *pfs_file, bool flush_to_disk);
++bool init_session_master_key(protected_fs_file_t *pfs_file);
++bool derive_random_node_key(protected_fs_file_t *pfs_file, uint64_t physical_node_number);
++bool generate_random_meta_data_key(protected_fs_file_t *pfs_file);
++
++//Note: Function below called(instead of C++  new protected_fs_file), when file is opened.
++uint32_t allocate_protected_fs_file(protected_fs_file_t** pfs_file, const char* filename, const char* mode, const sgx_aes_gcm_128bit_key_t* import_key, const sgx_aes_gcm_128bit_key_t* kdk_key);
++//Note:: Function below called(instead of C++ delete protected_fs_file),.when file is closed.
++void free_protected_fs_file(protected_fs_file_t *pfs_file);
++
++size_t pfs_file_write(protected_fs_file_t *pfs_file, const void* ptr, size_t size, size_t count);
++size_t pfs_file_read(protected_fs_file_t *pfs_file, void* ptr, size_t size, size_t count);
++int64_t pfs_file_tell(protected_fs_file_t *pfs_file);
++int pfs_file_seek(protected_fs_file_t *pfs_file, int64_t new_offset, int origin);
++bool pfs_file_get_eof(protected_fs_file_t *pfs_file);
++uint32_t pfs_file_get_error(protected_fs_file_t *pfs_file);
++void pfs_file_clear_error(protected_fs_file_t *pfs_file);
++int32_t pfs_file_clear_cache(protected_fs_file_t *pfs_file);
++bool pfs_file_flush(protected_fs_file_t *pfs_file/*bool mc*/);
++bool pfs_file_pre_close(protected_fs_file_t *pfs_file, sgx_key_128bit_t* key, bool import);
++int32_t pfs_file_remove(const char* filename);
+ 
+ #pragma pack(pop)
+ 
+diff --git a/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs.cpp b/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs.cpp
+index ce7b9b3..62e8967 100644
+--- a/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs.cpp
++++ b/sdk/protected_fs/sgx_tprotected_fs/sgx_tprotected_fs.cpp
+@@ -35,31 +35,23 @@
+ 
+ #include <errno.h>
+ 
+-
+ static SGX_FILE* sgx_fopen_internal(const char* filename, const char* mode, const sgx_key_128bit_t *auto_key, const sgx_key_128bit_t *kdk_key)
+ {
+-	protected_fs_file* file = NULL;
+-
++	protected_fs_file_t* file = NULL;
++    uint32_t status = 0;
++    
+ 	if (filename == NULL || mode == NULL)
+ 	{
+ 		errno = EINVAL;
+ 		return NULL;
+ 	}
+-
+-	try {
+-		file = new protected_fs_file(filename, mode, auto_key, kdk_key);
+-	}
+-	catch (std::bad_alloc e) {
+-		(void)e; // remove warning
+-		errno = ENOMEM;
+-		return NULL;
+-	}
+-
+-	if (file->get_error() != SGX_FILE_STATUS_OK)
++       	
++	status = allocate_protected_fs_file(&file, filename, mode, auto_key, kdk_key);
++		
++	if (status != 0)
+ 	{
+-		errno = file->get_error();
+-		delete file;
+-		file = NULL;
++    	errno = status;
++		return NULL;
+ 	}
+ 
+ 	return (SGX_FILE*)file;
+@@ -83,9 +75,9 @@ size_t sgx_fwrite(const void* ptr, size_t size, size_t count, SGX_FILE* stream)
+ 	if (ptr == NULL || stream == NULL || size == 0 || count == 0)
+ 		return 0;
+ 
+-	protected_fs_file* file = (protected_fs_file*)stream;
++	protected_fs_file_t* file = (protected_fs_file_t*)stream;
+ 
+-	return file->write(ptr, size, count);
++	return pfs_file_write(file, ptr, size, count);
+ }
+ 
+ 
+@@ -94,9 +86,9 @@ size_t sgx_fread(void* ptr, size_t size, size_t count, SGX_FILE* stream)
+ 	if (ptr == NULL || stream == NULL || size == 0 || count == 0)
+ 		return 0;
+ 
+-	protected_fs_file* file = (protected_fs_file*)stream;
++	protected_fs_file_t* file = (protected_fs_file_t*)stream;
+ 
+-	return file->read(ptr, size, count);
++	return pfs_file_read(file, ptr, size, count);
+ }
+ 
+ 
+@@ -105,9 +97,9 @@ int64_t sgx_ftell(SGX_FILE* stream)
+ 	if (stream == NULL)
+ 		return -1;
+ 
+-	protected_fs_file* file = (protected_fs_file*)stream;
++	protected_fs_file_t* file = (protected_fs_file_t*)stream;
+ 
+-	return file->tell();
++	return pfs_file_tell(file);
+ }
+ 
+ 
+@@ -116,9 +108,9 @@ int32_t sgx_fseek(SGX_FILE* stream, int64_t offset, int origin)
+ 	if (stream == NULL)
+ 		return -1;
+ 
+-	protected_fs_file* file = (protected_fs_file*)stream;
++	protected_fs_file_t* file = (protected_fs_file_t*)stream;
+ 
+-	return file->seek(offset, origin);
++	return pfs_file_seek(file, offset, origin);
+ }
+ 
+ 
+@@ -127,9 +119,9 @@ int32_t sgx_fflush(SGX_FILE* stream)
+ 	if (stream == NULL)
+ 		return EOPNOTSUPP; // TBD - currently we don't support NULL as fflush input parameter
+ 
+-	protected_fs_file* file = (protected_fs_file*)stream;
++	protected_fs_file_t* file = (protected_fs_file_t*)stream;
+ 
+-	return file->flush(/*false*/) == true ? 0 : EOF;
++	return pfs_file_flush(file/*false*/) == true ? 0 : EOF;
+ }
+ 
+ 
+@@ -150,7 +142,7 @@ int32_t sgx_fflush_and_increment_mc(SGX_FILE* stream)
+ 	if (stream == NULL)
+ 		return 1;
+ 
+-	protected_fs_file* file = (protected_fs_file*)stream;
++	protected_fs_file_t* file = (protected_fs_file_t*)stream;
+ 
+ 	return file->flush(true) == true ? 0 : 1;
+ }
+@@ -162,9 +154,9 @@ int32_t sgx_ferror(SGX_FILE* stream)
+ 	if (stream == NULL)
+ 		return -1;
+ 
+-	protected_fs_file* file = (protected_fs_file*)stream;
++	protected_fs_file_t* file = (protected_fs_file_t*)stream;
+ 
+-	return file->get_error();
++	return pfs_file_get_error(file);
+ }
+ 
+ 
+@@ -173,9 +165,9 @@ int32_t sgx_feof(SGX_FILE* stream)
+ 	if (stream == NULL)
+ 		return -1;
+ 	
+-	protected_fs_file* file = (protected_fs_file*)stream;
++	protected_fs_file_t* file = (protected_fs_file_t*)stream;
+ 
+-	return ((file->get_eof() == true) ? 1 : 0);
++	return ((pfs_file_get_eof(file) == true) ? 1 : 0);
+ }
+ 
+ 
+@@ -184,9 +176,9 @@ void sgx_clearerr(SGX_FILE* stream)
+ 	if (stream == NULL)
+ 		return;
+ 
+-	protected_fs_file* file = (protected_fs_file*)stream;
++	protected_fs_file_t* file = (protected_fs_file_t*)stream;
+ 
+-	file->clear_error();
++	pfs_file_clear_error(file);
+ }
+ 
+ 
+@@ -197,12 +189,12 @@ static int32_t sgx_fclose_internal(SGX_FILE* stream, sgx_key_128bit_t *key, bool
+ 	if (stream == NULL)
+ 		return EOF;
+ 
+-	protected_fs_file* file = (protected_fs_file*)stream;
++	protected_fs_file_t* file = (protected_fs_file_t*)stream;
+ 
+-	if (file->pre_close(key, import) == false)
++	if (pfs_file_pre_close(file, key, import) == false)
+ 		retval = 1;
+ 
+-	delete file;
++	free_protected_fs_file(file);
+ 
+ 	return retval;
+ }
+@@ -213,10 +205,13 @@ int32_t sgx_fclose(SGX_FILE* stream)
+ 	return sgx_fclose_internal(stream, NULL, false);
+ }
+ 
+-
++/* TODO: Investigate..how fopen, followed by remove.(without call to fclose).works in a normal app.
++ *  after opening a protected file, the object allocated for pfs_file..will not
++ *  get deleted, if there is no call to fclose.
++ *  Also check, this case was likely applicable, even previously, i.e. without any of our changes, we can keep-it as-is. */
+ int32_t sgx_remove(const char* filename)
+ {
+-	return protected_fs_file::remove(filename);
++	return pfs_file_remove(filename);
+ }
+ 
+ 
+@@ -245,7 +240,7 @@ int32_t sgx_fclear_cache(SGX_FILE* stream)
+ 	if (stream == NULL)
+ 		return 1;
+ 
+-	protected_fs_file* file = (protected_fs_file*)stream;
++	protected_fs_file_t* file = (protected_fs_file_t*)stream;
+ 
+-	return file->clear_cache();
+-}
+\ No newline at end of file
++	return pfs_file_clear_cache(file);
++}
+-- 
+2.24.0
+

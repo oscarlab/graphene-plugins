@@ -1,0 +1,79 @@
+CXX = g++
+
+#To enable verbose mode in GCC
+#CXXFLAGS +=-v
+#To enable which headers it includes
+#CXXFLAGS +=-H
+
+#Note: Needs to be updated as needed
+PATH_TO_GPFS_ROOT=../
+PATH_TO_GPFS_PROTFS=$(PATH_TO_GPFS_ROOT)/pfs_proxy
+PATH_TO_GPFS_PRELOAD=$(PATH_TO_GPFS_ROOT)/ld_preload_lib
+SGX_PROXY_INC=$(PATH_TO_GPFS_PROTFS)/sgx_proxy/inc
+
+SDK_PROTECTFS=./sdk/protected_fs
+
+SGX_GIT=$(PATH_TO_GPFS_ROOT)deps/linux-sgx
+EPID_SDK=$(SGX_GIT)/external/epid-sdk-3.0.0
+
+SGX_SDK_INCLUDES += -I$(SGX_GIT)/common/inc/internal \
+				-I$(EPID_SDK) -I$(SGX_GIT)/common/inc \
+				-I/opt/intel/sgxsdk/include
+
+CXXFLAGS += -fPIC -Wall -std=gnu++11 \
+		-I$(SDK_PROTECTFS)/sgx_uprotected_fs/ \
+		-I$(SDK_PROTECTFS)/sgx_tprotected_fs/ \
+		-I$(PATH_TO_GPFS_PROTFS) \
+		-I$(PATH_TO_GPFS_PRELOAD) \
+		-I$(SGX_PROXY_INC)
+		
+CXXFLAGS += $(SGX_SDK_INCLUDES)
+
+CXXFLAGS += -I. -Ideps/local/include
+#CFLAGSERRORS=-Wall -Wextra -Wwrite-strings -Wlogical-op -Wshadow -Werror
+#Note: Enable Werror to get rid of warnings...
+CFLAGSERRORS=-Wall -Wextra -Wwrite-strings -Wlogical-op -Wshadow
+CXXFLAGS += $(CFLAGSERRORS)# -DDEBUG -DDYNAMIC_RSA
+
+CFLAGS := $(filter-out -std=gnu++11,$(CXXFLAGS))
+
+CFLAGS += -std=gnu99
+
+$(info CXXFLAGS is $(CXXFLAGS))
+$(info CFLAGS is $(CFLAGS))
+
+PROTFS_UPROTFS_SRC_DIR := $(SDK_PROTECTFS)/sgx_uprotected_fs
+PROTFS_UPROTFS_OBJ_DIR := $(SDK_PROTECTFS)/obj
+PROTFS_UPROTFS_SRC_FILES := $(wildcard $(PROTFS_UPROTFS_SRC_DIR)/*.cpp)
+PROTFS_UPROTFS_OBJ_FILES := $(patsubst $(PROTFS_UPROTFS_SRC_DIR)/%.cpp,$(PROTFS_UPROTFS_OBJ_DIR)/%.o,$(PROTFS_UPROTFS_SRC_FILES))
+
+$(info PROTFS_UPROTFS_SRC_DIR is $(PROTFS_UPROTFS_SRC_DIR))
+$(info PROTFS_UPROTFS_OBJ_DIR is $(PROTFS_UPROTFS_OBJ_DIR))
+$(info PROTFS_UPROTFS_SRC_FILES is $(PROTFS_UPROTFS_SRC_FILES))
+$(info PROTFS_UPROTFS_OBJ_FILES is $(PROTFS_UPROTFS_OBJ_FILES))
+
+$(PROTFS_UPROTFS_OBJ_DIR)/%.o: $(PROTFS_UPROTFS_SRC_DIR)/%.cpp
+	mkdir -p $(SDK_PROTECTFS)/obj
+	g++ -c $(CXXFLAGS) $< -o $@
+
+PROTFS_TPROTFS_SRC_DIR := $(SDK_PROTECTFS)/sgx_tprotected_fs
+PROTFS_TPROTFS_OBJ_DIR := $(SDK_PROTECTFS)/obj
+PROTFS_TPROTFS_SRC_FILES := $(wildcard $(PROTFS_TPROTFS_SRC_DIR)/*.cpp)
+PROTFS_TPROTFS_OBJ_FILES := $(patsubst $(PROTFS_TPROTFS_SRC_DIR)/%.cpp,$(PROTFS_TPROTFS_OBJ_DIR)/%.o,$(PROTFS_TPROTFS_SRC_FILES))
+
+$(PROTFS_TPROTFS_OBJ_DIR)/%.o: $(PROTFS_TPROTFS_SRC_DIR)/%.cpp
+	g++ -c $(CXXFLAGS) $< -o $@
+
+PROTFS_OBJ_DIR := $(SDK_PROTECTFS)/obj
+
+libpfs_sdk.a: $(PROTFS_UPROTFS_OBJ_FILES) $(PROTFS_TPROTFS_OBJ_FILES) -ldl
+	$(AR) rcs $@ $^
+
+README.html : README.md
+	pandoc --from markdown_github --to html --standalone $< --output $@
+
+clean:
+	rm -rf $(SDK_PROTECTFS)/obj;
+	rm -rf *.a;
+	
+all: libpfs_sdk.a
